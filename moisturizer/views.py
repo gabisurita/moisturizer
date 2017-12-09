@@ -1,13 +1,68 @@
 from cornice import Service
 from cornice.resource import resource
+from pyramid.httpexceptions import HTTPNotFound, HTTPBadRequest
+from moisturizer.models import DescriptorModel, ModelNotExists, infer_model
 
-from moisturizer.models import infer_model
+
+meta_service = Service(name="server_info", path="/__heartbeat__")
 
 
-@resource(collection_path='/{table}', path='/{table}/{id}')
+@meta_service.get()
+def im_alive(request):
+    return {
+        "self": "Ok",
+        "cassandra": "Ok" if infer_model('table_descriptor') else "Fail",
+    }
+
+
+def parse_exception(exception):
+    return {
+        'message': str(exception),
+        'table': exception.table,
+        'type': exception.__class__.__name__,
+    }
+
+
+def format_http_error(http_error, exception):
+    return http_error(json={
+        'error': parse_exception(exception)
+    })
+
+
+@resource(collection_path='/', path='/{table}')
+class InferredSchemaResource(object):
+    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH', 'DELETE',)
+
+    def __init__(self, request, context=None):
+        self.request = request
+        self.table = self.request.matchdict.get('table')
+
+    def collection_get(self):
+        return [e.serialize() for e in DescriptorModel.objects.all()]
+
+    def collection_delete(self):
+        return [self._serialize_and_delete(e) for e in
+                DescriptorModel.objects.all()
+                if e.table != DescriptorModel.__keyspace__]
+
+    def get(self):
+        DescriptorModel.objects.get(table=self.table).serialize()
+
+    def delete(self):
+        descriptor = DescriptorModel.objects.get(table=self.table)
+        result = descriptor.serialize()
+        descriptor.delete()
+        return result
+
+    def _serialize_and_delete(self, e):
+        result = e.serialize()
+        e.delete()
+        return result
+
+
+@resource(collection_path='/{table}/objects', path='/{table}/objects/{id}')
 class InferredObjectResource(object):
-
-    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH')
+    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH',)
 
     def __init__(self, request, context=None):
         self.request = request
@@ -16,10 +71,31 @@ class InferredObjectResource(object):
 
     @property
     def Model(self):
-        payload = (self.request.json if self.request.method in
-                   self.ALLOW_WRITE_TO_SCHEMA else None)
+        try:
+            return infer_model(self.table, self.payload)
+        except ModelNotExists as e:
+            raise format_http_error(HTTPNotFound, e)
 
-        return infer_model(self.table, payload)
+    @property
+    def payload(self):
+        if self.request.method not in self.ALLOW_WRITE_TO_SCHEMA:
+            return
+
+        payload = self.request.json or {}
+        payload_id = payload.get('id')
+
+        if payload_id and self.id and str(payload_id) != self.id:
+            e = Exception()
+            raise format_http_error(HTTPBadRequest, e)
+
+        if self.id:
+            payload['id'] = self.id
+
+        return payload
+
+    @property
+    def obj(self):
+        return self.Model.objects.get(id=self.id)
 
     def collection_post(self):
         new = self.Model(**self.request.json).save()
@@ -40,26 +116,20 @@ class InferredObjectResource(object):
                 self.Model.objects.get(id=self.id).serialize())
 
     def put(self):
-        self.Model.objects.get(id=self.id).delete()
-        new = self.Model(id=self.id, **self.request.json).save()
+        Model = self.Model
+        try:
+            Model.objects.get(id=self.id).delete()
+        except Model.DoesNotExist:
+            pass
+
+        new = self.Model(**self.payload).save()
         return new.serialize()
 
     def patch(self):
-        self.Model.objects.filter(id=self.id).update(**self.request.json)
+        self.Model.objects.filter(id=self.id).update(**self.payload)
         return self.Model.get(id=self.id).serialize()
 
-    def _serialize_and_delete(e):
+    def _serialize_and_delete(self, e):
         result = e.serialize()
         e.delete()
         return result
-
-
-meta_service = Service(name="server_info", path="/")
-
-
-@meta_service.get()
-def im_alive(request):
-    return {
-        "self": "Ok",
-        "cassandra": "Ok" if infer_model('table_descriptor') else "Fail",
-    }

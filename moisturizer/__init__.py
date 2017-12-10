@@ -7,7 +7,7 @@ import logmatic
 from pyramid.config import Configurator as BaseConfigurator, ConfigurationError
 from cassandra.cqlengine import connection, management
 
-from moisturizer.models import DescriptorModel
+from moisturizer.models import DescriptorModel, UserModel
 
 
 REQUIRED_SETTINGS = [
@@ -17,6 +17,7 @@ DEFAULT_SETTINGS = {
     'moisturizer.cassandra_cluster': ['0.0.0.0'],
     'moisturizer.keyspace': 'moisturizer',
     'moisturizer.descriptor_key': '__table_descriptor__',
+    'moisturizer.user_key': '__users__',
 
     'moisturizer.read_only': False,
     'moisturizer.immutable_schema': False,
@@ -24,6 +25,9 @@ DEFAULT_SETTINGS = {
 
     'moisturizer.create_keyspace': True,
     'moisturizer.override_keyspace': False,
+
+    'moisturizer.admin_id': 'admin',
+    'moisturizer.admin_password': 'admin',
 }
 
 
@@ -54,15 +58,33 @@ def allow_inference_migration(settings):
             not settings['moisturizer.strict_schema'])
 
 
-def migrate_descriptor(settings):
+def migrate_metaschema(settings):
     """Creates if not exists the Table descriptor Model and ajust
     it to the current schema."""
 
     descriptor_key = settings['moisturizer.descriptor_key']
+    user_key = settings['moisturizer.user_key']
+    admin_id = settings['moisturizer.admin_id']
+    admin_password = settings['moisturizer.admin_id']
 
+    # Create users
+    management.create_keyspace_simple(user_key, replication_factor=2)
+    UserModel.__keyspace__ = user_key
+    management.sync_table(UserModel)
+
+    # Create admin
+    UserModel.objects.create(
+        id=admin_id,
+        password=admin_password,
+        owner=admin_id
+    )
+
+    # Create descriptors
     management.create_keyspace_simple(descriptor_key, replication_factor=2)
     DescriptorModel.__keyspace__ = descriptor_key
     management.sync_table(DescriptorModel)
+
+    DescriptorModel.create(table=user_key)
     DescriptorModel.create(table=descriptor_key)
 
 
@@ -79,6 +101,7 @@ def main(global_config, **settings):
 
     config = Configurator(settings=settings)
     config.include("cornice")
+    config.include("moisturizer.auth")
     config.scan("moisturizer.views")
 
     connection.setup(settings['moisturizer.cassandra_cluster'],
@@ -90,6 +113,6 @@ def main(global_config, **settings):
     os.environ['CQLENG_ALLOW_SCHEMA_MANAGEMENT'] = str(migrate)
 
     if migrate:
-        migrate_descriptor(settings)
+        migrate_metaschema(settings)
 
     return config.make_wsgi_app()

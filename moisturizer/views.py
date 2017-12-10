@@ -1,7 +1,14 @@
 from cornice import Service
 from cornice.resource import resource
 from pyramid.httpexceptions import HTTPNotFound, HTTPBadRequest
-from moisturizer.models import DescriptorModel, ModelNotExists, infer_model
+
+from moisturizer.models import (
+    DescriptorModel,
+    ModelNotExists,
+    UserModel,
+    infer_model
+)
+from moisturizer.exceptions import format_http_error
 
 
 meta_service = Service(name="server_info", path="/__heartbeat__")
@@ -9,58 +16,21 @@ meta_service = Service(name="server_info", path="/__heartbeat__")
 
 @meta_service.get()
 def im_alive(request):
+    descriptor_key = request.registry.settings['moisturizer.descriptor_key']
+    try:
+        infer_model(descriptor_key)
+        descriptors = True
+    except Exception:
+        descriptors = False
+
     return {
-        "self": "Ok",
-        "cassandra": "Ok" if infer_model('table_descriptor') else "Fail",
+        "self": True,
+        "descriptors": descriptors,
     }
 
 
-def parse_exception(exception):
-    return {
-        'message': str(exception),
-        'table': exception.table,
-        'type': exception.__class__.__name__,
-    }
-
-
-def format_http_error(http_error, exception):
-    return http_error(json={
-        'error': parse_exception(exception)
-    })
-
-
-@resource(collection_path='/', path='/{table}')
-class InferredSchemaResource(object):
-    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH', 'DELETE',)
-
-    def __init__(self, request, context=None):
-        self.request = request
-        self.table = self.request.matchdict.get('table')
-
-    def collection_get(self):
-        return [e.serialize() for e in DescriptorModel.objects.all()]
-
-    def collection_delete(self):
-        return [self._serialize_and_delete(e) for e in
-                DescriptorModel.objects.all()
-                if e.table != DescriptorModel.__keyspace__]
-
-    def get(self):
-        DescriptorModel.objects.get(table=self.table).serialize()
-
-    def delete(self):
-        descriptor = DescriptorModel.objects.get(table=self.table)
-        result = descriptor.serialize()
-        descriptor.delete()
-        return result
-
-    def _serialize_and_delete(self, e):
-        result = e.serialize()
-        e.delete()
-        return result
-
-
-@resource(collection_path='/{table}/objects', path='/{table}/objects/{id}')
+@resource(collection_path='/schemas/{table}/entries',
+          path='/schemas/{table}/entries/{id}',)
 class InferredObjectResource(object):
     ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH',)
 
@@ -68,6 +38,7 @@ class InferredObjectResource(object):
         self.request = request
         self.table = self.request.matchdict['table']
         self.id = self.request.matchdict.get('id')
+        self.principals = self.request.effective_principals
 
     @property
     def Model(self):
@@ -94,26 +65,28 @@ class InferredObjectResource(object):
         return payload
 
     @property
-    def obj(self):
-        return self.Model.objects.get(id=self.id)
+    def query(self):
+        return self.Model.all()
+
+    @property
+    def entry(self):
+        return self.Model.get(id=self.id)
 
     def collection_post(self):
-        new = self.Model(**self.request.json).save()
+        new = self.Model.create(**self.request.json)
         return new.serialize()
 
     def collection_get(self):
-        return [e.serialize() for e in self.Model.objects.all()]
+        return [e.serialize() for e in self.query]
 
     def collection_delete(self):
-        return [self._serialize_and_delete(e)
-                for e in self.Model.objects.all()]
+        return [self._serialize_and_delete(e) for e in self.query]
 
     def get(self):
-        return self.Model.objects.get(id=self.id).serialize()
+        return self.entry.serialize()
 
     def delete(self):
-        return self._serialize_and_delete(
-                self.Model.objects.get(id=self.id).serialize())
+        return self._serialize_and_delete(self.entry)
 
     def put(self):
         Model = self.Model
@@ -126,10 +99,44 @@ class InferredObjectResource(object):
         return new.serialize()
 
     def patch(self):
-        self.Model.objects.filter(id=self.id).update(**self.payload)
-        return self.Model.get(id=self.id).serialize()
+        self.entry.update(**self.payload)
+        return self.entry.serialize()
 
     def _serialize_and_delete(self, e):
         result = e.serialize()
         e.delete()
         return result
+
+
+@resource(collection_path='/schemas',
+          path='/schemas/{id}',)
+class InferredSchemaResource(InferredObjectResource):
+    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH', 'DELETE',)
+
+    def __init__(self, request, context=None):
+        self.request = request
+        self.table = self.request.matchdict.get('id')
+        self.principals = self.request.effective_principals
+
+    @property
+    def Model(self):
+        return DescriptorModel
+
+    def collection_delete(self):
+        return [self._serialize_and_delete(e) for e in
+                DescriptorModel.objects.all()
+                if e.table != DescriptorModel.__keyspace__]
+
+
+@resource(collection_path='/users',
+          path='/users/{id}',)
+class UserResource(InferredObjectResource):
+
+    def __init__(self, request, context=None):
+        self.request = request
+        self.id = self.request.matchdict.get('id')
+        self.principals = self.request.effective_principals
+
+    @property
+    def Model(self):
+        return UserModel

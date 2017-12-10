@@ -4,12 +4,13 @@ import os
 from setuptools import setup, find_packages
 
 REQUIREMENTS = [
+    'bcrypt'
+    'cassandra-driver',
     'cornice',
     'colander',
     'PasteScript',
     'waitress',
     'logmatic-python',
-    'cassandra-driver',
 ]
 
 

@@ -1,15 +1,18 @@
+import bcrypt
 import datetime
 import logging
 import uuid
 
 from cassandra.cqlengine import models, columns, management
 
+from moisturizer.exceptions import ModelNotExists
+
 
 logger = logging.getLogger("models")
 logger.setLevel(logging.DEBUG)
 
 
-PRIMITIVES = [int, bool, float, str, dict]
+PRIMITIVES = [int, bool, float, str, dict, list]
 
 
 def cast_primitive(value):
@@ -42,6 +45,7 @@ def inspect_schema_change(payload):
 class DescriptorModel(models.Model):
     table = columns.Text(primary_key=True)
     fields = columns.Map(columns.Text, columns.Text)
+    owner = columns.Text(index=True)
 
     @property
     def schema(self):
@@ -70,6 +74,7 @@ class InferredModel(models.Model):
                       default=lambda: str(uuid.uuid4()))
     last_modified = columns.DateTime(index=True,
                                      default=datetime.datetime.now)
+    owner = columns.Text(index=True)
 
     @classmethod
     def apply_schema_change(cls, schema):
@@ -94,16 +99,34 @@ class InferredModel(models.Model):
         return {k: cast_primitive(v) for k, v in self.items()}
 
 
-class ModelInferenceException(Exception):
+class UserModel(InferredModel):
+    __keyspace__ = '__users__'
+    _password = columns.Ascii()
+    owner = columns.Text(index=True, required=True)
 
-    def __init__(self, table):
-        self.table = table
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        plain_password = kwargs.get('password')
+        self.process_plain_password(plain_password)
 
+    def create(self, *args, **kwargs):
+        super().create(*args, **kwargs)
+        plain_password = kwargs.get('password')
+        self.process_plain_password(plain_password)
 
-class ModelNotExists(ModelInferenceException):
+    def process_plain_password(self, plain_password):
+        if plain_password:
+            hashed = bcrypt.hashpw(plain_password.encode('utf-8'),
+                                   bcrypt.gensalt())
+            self._password = hashed.decode('utf-8')
 
-    def __str__(self):
-        return "Table {} does not exists.".format(self.table)
+    def check_password(self, given_password):
+        return bcrypt.checkpw(given_password.encode('utf-8'),
+                              self._password.encode('utf-8'))
+
+    def serialize(self):
+        return {k: cast_primitive(v) for k, v in self.items()
+                if k != '_password'}
 
 
 def create_model(table, payload=None):

@@ -1,5 +1,3 @@
-"""Main entry point
-"""
 import os
 import logging
 

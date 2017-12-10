@@ -101,8 +101,9 @@ class InferredModel(models.Model):
 
 class UserModel(InferredModel):
     __keyspace__ = '__users__'
-    _password = columns.Ascii()
-    owner = columns.Text(index=True, required=True)
+    _password = columns.Ascii(required=True)
+    api_key = columns.UUID(default=uuid.uuid4)
+    owner = columns.Text(index=True)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -6,20 +6,21 @@ from moisturizer.exceptions import AuthenticationError, format_http_error
 from moisturizer.models import UserModel
 
 
-def check_user(id, password, request):
+def check_user(id, key, request):
     if id is not None:
         try:
             user = UserModel.objects.get(id=id)
-            if not user.check_password(password):
-                raise AuthenticationError()
+            setattr(request, 'user', user)
 
         except UserModel.DoesNotExist:
             raise format_http_error(HTTPUnauthorized, AuthenticationError())
 
-        except AuthenticationError as e:
-            raise format_http_error(HTTPUnauthorized, e)
+        if str(user.api_key) == key:
+            return []
+        elif user.check_password(key):
+            return []
 
-        setattr(request, 'user', user)
+        raise format_http_error(HTTPUnauthorized, AuthenticationError())
 
 
 def includeme(config):

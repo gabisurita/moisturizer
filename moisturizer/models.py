@@ -12,7 +12,7 @@ logger = logging.getLogger("models")
 logger.setLevel(logging.DEBUG)
 
 
-PRIMITIVES = [int, bool, float, str, dict, list]
+PRIMITIVES = [int, bool, float, str, dict, list, type(None)]
 
 
 def cast_primitive(value):

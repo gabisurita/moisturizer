@@ -1,0 +1,10 @@
+version: '3'
+services:
+  moisturizer:
+    image: gabisurita/moisturizer
+    environment:
+      MOISTURIZER_CASSANDRA_CLUSTER: 'cassandra'
+    ports:
+      - 10085:10085
+  cassandra:
+    image: cassandra:3

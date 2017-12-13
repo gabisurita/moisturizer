@@ -3,19 +3,20 @@ import logging
 
 import logmatic
 from pyramid.config import Configurator as BaseConfigurator, ConfigurationError
-from cassandra.cqlengine import connection, management
+from cassandra.cqlengine import connection, management, query
 
-from moisturizer.models import DescriptorModel, UserModel
+from moisturizer.models import DescriptorModel, UserModel, PermissionModel
 
 
 REQUIRED_SETTINGS = [
 ]
 
 DEFAULT_SETTINGS = {
-    'moisturizer.cassandra_cluster': ['0.0.0.0'],
+    'moisturizer.cassandra_cluster': '0.0.0.0',
     'moisturizer.keyspace': 'moisturizer',
     'moisturizer.descriptor_key': '__table_descriptor__',
     'moisturizer.user_key': '__users__',
+    'moisturizer.permission_key': '__permissions__',
 
     'moisturizer.read_only': False,
     'moisturizer.immutable_schema': False,
@@ -62,34 +63,49 @@ def migrate_metaschema(settings):
 
     descriptor_key = settings['moisturizer.descriptor_key']
     user_key = settings['moisturizer.user_key']
+    permission_key = settings['moisturizer.permission_key']
     admin_id = settings['moisturizer.admin_id']
     admin_password = settings['moisturizer.admin_id']
+    override_keyspace = settings['moisturizer.override_keyspace']
+
+    if override_keyspace:
+        management.drop_keyspace(descriptor_key)
+        management.drop_keyspace(user_key)
 
     # Create users
-    management.create_keyspace_simple(user_key, replication_factor=2)
+    management.create_keyspace_simple(user_key, replication_factor=1)
     UserModel.__keyspace__ = user_key
     management.sync_table(UserModel)
 
+    # Create permissions
+    management.create_keyspace_simple(permission_key, replication_factor=1)
+    PermissionModel.__keyspace__ = permission_key
+    management.sync_table(PermissionModel)
+
     # Create admin
-    UserModel.objects.create(
-        id=admin_id,
-        password=admin_password,
-        owner=admin_id
-    )
+    try:
+        UserModel.objects.if_not_exists().create(
+            id=admin_id,
+            password=admin_password,
+            role=UserModel.ROLE_ADMIN,
+        )
+    except query.LWTException:
+        pass
 
     # Create descriptors
-    management.create_keyspace_simple(descriptor_key, replication_factor=2)
+    management.create_keyspace_simple(descriptor_key, replication_factor=1)
     DescriptorModel.__keyspace__ = descriptor_key
     management.sync_table(DescriptorModel)
 
-    DescriptorModel.create(table=user_key)
-    DescriptorModel.create(table=descriptor_key)
+    DescriptorModel.create(id=user_key)
+    DescriptorModel.create(id=descriptor_key)
+    DescriptorModel.create(id=permission_key)
 
 
 def main(global_config, **settings):
     for name, value in DEFAULT_SETTINGS.items():
-        settings[name] = (get_config_environ(name) or
-                          settings.get(name) or value)
+        settings.setdefault(name, (get_config_environ(name) or
+                                   settings.get(name) or value))
 
     for name in REQUIRED_SETTINGS:
         if settings.get(name) is None:
@@ -102,7 +118,7 @@ def main(global_config, **settings):
     config.include("moisturizer.auth")
     config.scan("moisturizer.views")
 
-    connection.setup(settings['moisturizer.cassandra_cluster'],
+    connection.setup([settings['moisturizer.cassandra_cluster']],
                      settings['moisturizer.keyspace'],
                      protocol_version=3)
 

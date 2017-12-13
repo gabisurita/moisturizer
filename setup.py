@@ -4,7 +4,7 @@ import os
 from setuptools import setup, find_packages
 
 REQUIREMENTS = [
-    'bcrypt'
+    'bcrypt',
     'cassandra-driver',
     'cornice',
     'colander',
@@ -40,8 +40,8 @@ setup(
     keywords="web services",
     author='Gabriela Surita',
     author_email='gsurita@loggi.com',
-    url='https://github.com/gabisurita/new-earth',
-    licence='Apache Licence v2.0',
+    url='https://github.com/gabisurita/moisturizer',
+    license='Apache Licence v2.0',
     packages=find_packages(),
     include_package_data=True,
     zip_safe=False,

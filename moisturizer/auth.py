@@ -16,9 +16,9 @@ def check_user(id, key, request):
             raise format_http_error(HTTPUnauthorized, AuthenticationError())
 
         if str(user.api_key) == key:
-            return []
+            return [user.role]
         elif user.check_password(key):
-            return []
+            return [user.role]
 
         raise format_http_error(HTTPUnauthorized, AuthenticationError())
 

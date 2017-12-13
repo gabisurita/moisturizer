@@ -1,18 +1,25 @@
-import colander
+import datetime
+
 from cornice import Service
 from cornice.resource import resource
-from cornice.validators import colander_validator
+from cornice.validators import colander_validator, colander_body_validator
+from pyramid.decorator import reify
 from pyramid.httpexceptions import HTTPNotFound, HTTPBadRequest, HTTPException
 
 from moisturizer.models import (
     DescriptorModel,
     ModelNotExists,
     UserModel,
+    PermissionModel,
     infer_model
 )
 from moisturizer.exceptions import format_http_error, parse_exception
+from moisturizer.schemas import (
+    InferredTypeSchema,
+    InferredObjectSchema,
+    BatchRequest
+)
 from moisturizer.utils import (
-    merge_dicts,
     build_request,
     build_response,
     follow_subrequest
@@ -20,10 +27,10 @@ from moisturizer.utils import (
 
 
 batch = Service(name="batch", path="/batch")
-meta_service = Service(name="server_info", path="/__heartbeat__")
+heartbeat = Service(name="server_info", path="/__heartbeat__")
 
 
-@meta_service.get()
+@heartbeat.get()
 def im_alive(request):
     descriptor_key = request.registry.settings['moisturizer.descriptor_key']
     user_key = request.registry.settings['moisturizer.user_key']
@@ -43,72 +50,230 @@ def im_alive(request):
     return {
         "server": True,
         "schema": descriptors,
-        "auth": users,
+        "users": users,
     }
 
 
-valid_http_method = colander.OneOf(('GET', 'HEAD', 'DELETE', 'TRACE',
-                                    'POST', 'PUT', 'PATCH'))
+@resource(collection_path='/types/{type_id}/objects',
+          path='/types/{type_id}/objects/{id}',
+          validators=('deserialize_model',))
+class InferredObjectResource(object):
+    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH',)
+
+    def __init__(self, request, context=None):
+        self.request = request
+        self.type_id = self.request.matchdict.get('type_id')
+        self.id = self.request.matchdict.get('id')
+        self.principals = (getattr(self.request, 'principals', None) or
+                           self.request.effective_principals)
+        self.user = self.request.user
+
+    def deserialize_model(self, request, **kwargs):
+        kwargs['schema'] = self.schema
+        return colander_body_validator(request, **kwargs)
+
+    @reify
+    def schema(self):
+        return InferredObjectSchema().bind(type_id=self.type_id)
+
+    @reify
+    def Model(self):
+        """The Model representing the current resource. The model is inferred
+        at runtime by the given ``type_id``."""
+        try:
+            return infer_model(self.type_id, self.payload)
+        except ModelNotExists as e:
+            raise format_http_error(HTTPNotFound, e)
+
+    @reify
+    def query(self):
+        return self.Model.all()
+
+    @reify
+    def entry(self):
+        return self.Model.get(id=self.id)
+
+    @reify
+    def payload(self):
+        if self.request.method not in self.ALLOW_WRITE_TO_SCHEMA:
+            return
+
+        payload = self.request.validated or {}
+
+        payload.setdefault('last_modified', datetime.datetime.now())
+        if self.id is not None:
+            payload.setdefault('id', self.id)
+
+        return payload
+
+    @reify
+    def permissions(self):
+        # Admins can do wathever they want.
+        if self.user.role == UserModel.ROLE_ADMIN:
+            return PermissionModel.admin
+
+        try:
+            # Try to fetch explicit permissions at the backend.
+            perms = PermissionModel.get(
+                id=self.id if self.id else self.type_id,
+                type_id=self.type_id if self.id else '',
+                owner=self.request.user.id,
+            )
+
+        except PermissionModel.DoesNotExist:
+            return PermissionModel()
+
+        return perms
+
+    def collection_post(self):
+        try:
+            new = self.Model.create(**self.request.validated)
+        except Exception as e:
+            raise format_http_error(HTTPBadRequest, e)
+
+        return self.postprocess(new)
+
+    def collection_get(self):
+        result = [e for e in self.query]
+        return self.postprocess(result)
+
+    def collection_delete(self):
+        return self.postprocess(
+            [self._serialize_and_delete(e) for e in self.query]
+        )
+
+    def get(self):
+        return self.postprocess(self.entry)
+
+    def delete(self):
+        return self.postprocess(
+            self._serialize_and_delete(self.entry)
+        )
+
+    def put(self):
+        Model = self.Model
+        try:
+            Model.objects.get(id=self.id).delete()
+        except Model.DoesNotExist:
+            pass
+
+        new = self.Model(**self.request.validated).save()
+        return self.postprocess(new)
+
+    def patch(self):
+        self.entry.update(**self.payload)
+        return self.postprocess(self.entry)
+
+    def _serialize_and_delete(self, e):
+        e.delete()
+        return e
+
+    def postprocess(self, result):
+        if isinstance(result, list):
+            return [self.schema.serialize(e) for e in result]
+        return self.schema.serialize(result)
 
 
-def string_values(node, cstruct):
-    """Validate that a ``colander.Mapping`` only has strings in its values.
+@resource(collection_path='/types',
+          path='/types/{id}',
+          validators=('deserialize_model',))
+class InferredTypeResource(InferredObjectResource):
+    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH', 'DELETE',)
 
-    .. warning::
+    @reify
+    def schema(self):
+        return InferredTypeSchema().bind(type_id=self.type_id)
 
-        Should be associated to a ``colander.Mapping`` schema node.
-    """
-    are_strings = [isinstance(v, str) for v in cstruct.values()]
-    if not all(are_strings):
-        error_msg = '{} contains non string value'.format(cstruct)
-        raise colander.Invalid(node, error_msg)
+    @reify
+    def Model(self):
+        return DescriptorModel
 
+    def deserialize_model(self, request, **kwargs):
+        kwargs['schema'] = InferredTypeSchema().bind()
+        return colander_body_validator(request, **kwargs)
 
-class BatchRequestSchema(colander.MappingSchema):
-    method = colander.SchemaNode(colander.String(),
-                                 validator=valid_http_method,
-                                 missing=colander.drop)
-    path = colander.SchemaNode(colander.String(),
-                               validator=colander.Regex('^/'))
-    headers = colander.SchemaNode(colander.Mapping(unknown='preserve'),
-                                  validator=string_values,
-                                  missing=colander.drop)
-    body = colander.SchemaNode(colander.Mapping(unknown='preserve'),
-                               missing=colander.drop)
+    @reify
+    def type_id(self):
+        return self.Model.__keyspace__
 
-    @staticmethod
-    def schema_type():
-        return colander.Mapping(unknown='raise')
-
-
-class BatchPayloadSchema(colander.MappingSchema):
-    defaults = BatchRequestSchema(missing=colander.drop).clone()
-    requests = colander.SchemaNode(colander.Sequence(),
-                                   BatchRequestSchema())
-
-    @staticmethod
-    def schema_type():
-        return colander.Mapping(unknown='raise')
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # On defaults, path is not mandatory.
-        self.get('defaults').get('path').missing = colander.drop
-
-    def deserialize(self, cstruct=colander.null):
-        """Preprocess received data to carefully merge defaults."""
-        if cstruct is not colander.null:
-            defaults = cstruct.get('defaults')
-            requests = cstruct.get('requests')
-            if isinstance(defaults, dict) and isinstance(requests, list):
-                for request in requests:
-                    if isinstance(request, dict):
-                        merge_dicts(request, defaults)
-        return super().deserialize(cstruct)
+    def collection_delete(self):
+        return self.postprocess([
+            self._serialize_and_delete(e)
+            for e in DescriptorModel.objects.all()
+            if e.id not in (DescriptorModel.__keyspace__,
+                            UserModel.__keyspace__,
+                            PermissionModel.__keyspace__)
+        ])
 
 
-class BatchRequest(colander.MappingSchema):
-    body = BatchPayloadSchema()
+@resource(collection_path='/users',
+          path='/users/{id}',
+          validators=('deserialize_model',))
+class UserResource(InferredObjectResource):
+    @reify
+    def Model(self):
+        return UserModel
+
+    @reify
+    def type_id(self):
+        return self.Model.__keyspace__
+
+
+@resource(collection_path='/types/{type_id}/permissions',
+          path='/types/{type_id}/permissions/{id}',)
+class TypePermissionResource(InferredObjectResource):
+    @reify
+    def Model(self):
+        return PermissionModel
+
+    @reify
+    def query(self):
+        return self.Model.filter(
+            id=self.type_id,
+            type_id='',
+            owner__in=[u.id for u in UserModel.all()],
+        )
+
+    @reify
+    def entry(self):
+        return self.Model.get(
+            id=self.type_id,
+            type_id='',
+            owner=self.id,
+        )
+
+    @reify
+    def owner_id(self):
+        return self.request.matchdict.get('owner_id')
+
+
+@resource(collection_path='/types/{type_id}/objects/{id}/permissions',
+          path='/types/{type_id}/objects/{id}/permissions/{owner_id}',)
+class ObjectPermissionResource(InferredObjectResource):
+
+    @reify
+    def Model(self):
+        return PermissionModel
+
+    @reify
+    def query(self):
+        return self.Model.filter(
+            id=self.id,
+            type_id=self.type_id,
+            owner__in=[u.id for u in UserModel.all()],
+        )
+
+    @reify
+    def entry(self):
+        return self.Model.get(
+            id=self.id,
+            type_id=self.type_id,
+            owner=self.owner_id,
+        )
+
+    @reify
+    def owner_id(self):
+        return self.request.matchdict.get('owner_id')
 
 
 @batch.post(schema=BatchRequest(), validators=(colander_validator,))
@@ -140,121 +305,3 @@ def batch_me(request):
     }
 
     return payload
-
-
-@resource(collection_path='/schemas/{table}/entries',
-          path='/schemas/{table}/entries/{id}',)
-class InferredObjectResource(object):
-    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH',)
-
-    def __init__(self, request, context=None):
-        self.request = request
-        self.table = self.request.matchdict['table']
-        self.id = self.request.matchdict.get('id')
-        self.principals = (getattr(self.request, 'principals', None) or
-                           self.request.effective_principals)
-
-    @property
-    def Model(self):
-        try:
-            return infer_model(self.table, self.payload)
-        except ModelNotExists as e:
-            raise format_http_error(HTTPNotFound, e)
-
-    @property
-    def payload(self):
-        if self.request.method not in self.ALLOW_WRITE_TO_SCHEMA:
-            return
-
-        payload = self.request.json or {}
-        payload_id = payload.get('id')
-
-        if payload_id and self.id and str(payload_id) != self.id:
-            e = Exception()
-            raise format_http_error(HTTPBadRequest, e)
-
-        if self.id:
-            payload['id'] = self.id
-
-        if self.request.method in ('POST', 'PUT'):
-            payload.setdefault('owner', self.request.user.id)
-
-        return payload
-
-    @property
-    def query(self):
-        return self.Model.all()
-
-    @property
-    def entry(self):
-        return self.Model.get(id=self.id)
-
-    def collection_post(self):
-        new = self.Model.create(**self.payload)
-        return new.serialize()
-
-    def collection_get(self):
-        return [e.serialize() for e in self.query]
-
-    def collection_delete(self):
-        return [self._serialize_and_delete(e) for e in self.query]
-
-    def get(self):
-        return self.entry.serialize()
-
-    def delete(self):
-        return self._serialize_and_delete(self.entry)
-
-    def put(self):
-        Model = self.Model
-        try:
-            Model.objects.get(id=self.id).delete()
-        except Model.DoesNotExist:
-            pass
-
-        new = self.Model(**self.payload).save()
-        return new.serialize()
-
-    def patch(self):
-        self.entry.update(**self.payload)
-        return self.entry.serialize()
-
-    def _serialize_and_delete(self, e):
-        result = e.serialize()
-        e.delete()
-        return result
-
-
-@resource(collection_path='/schemas',
-          path='/schemas/{id}',)
-class InferredSchemaResource(InferredObjectResource):
-    ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH', 'DELETE',)
-
-    def __init__(self, request, context=None):
-        self.request = request
-        self.table = self.request.matchdict.get('id')
-        self.principals = self.request.effective_principals
-
-    @property
-    def Model(self):
-        return DescriptorModel
-
-    def collection_delete(self):
-        return [self._serialize_and_delete(e) for e in
-                DescriptorModel.objects.all()
-                if e.table not in (DescriptorModel.__keyspace__,
-                                   UserModel.__keyspace__)]
-
-
-@resource(collection_path='/users',
-          path='/users/{id}',)
-class UserResource(InferredObjectResource):
-
-    def __init__(self, request, context=None):
-        self.request = request
-        self.id = self.request.matchdict.get('id')
-        self.principals = self.request.effective_principals
-
-    @property
-    def Model(self):
-        return UserModel

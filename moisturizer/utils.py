@@ -1,49 +1,9 @@
 import json
 from urllib.parse import unquote
 
-import colander
 from pyramid import httpexceptions
 from pyramid.request import Request, apply_request_extensions
 from pyramid.view import render_view_to_response
-
-
-def follow_subrequest(request, subrequest, **kwargs):
-    """Run a subrequest (e.g. batch), and follow the redirection if any.
-
-    :rtype: tuple
-    :returns: the reponse and the redirection request (or `subrequest`
-              if no redirection happened.)
-    """
-    try:
-        try:
-            return request.invoke_subrequest(subrequest, **kwargs), subrequest
-        except Exception as e:
-            resp = render_view_to_response(e, subrequest)
-            if not resp or resp.status_code >= 500:
-                raise e
-            raise resp
-    except httpexceptions.HTTPRedirection as e:
-        new_location = e.headers['Location']
-        new_request = Request.blank(path=new_location,
-                                    headers=subrequest.headers,
-                                    POST=subrequest.body,
-                                    method=subrequest.method)
-        new_request.bound_data = subrequest.bound_data
-        new_request.parent = getattr(subrequest, 'parent', None)
-        return request.invoke_subrequest(new_request, **kwargs), new_request
-
-
-def string_values(node, cstruct):
-    """Validate that a ``colander.Mapping`` only has strings in its values.
-
-    .. warning::
-
-        Should be associated to a ``colander.Mapping`` schema node.
-    """
-    are_strings = [isinstance(v, str) for v in cstruct.values()]
-    if not all(are_strings):
-        error_msg = '{} contains non string value'.format(cstruct)
-        raise colander.Invalid(node, error_msg)
 
 
 def build_request(original, dict_obj):
@@ -118,6 +78,41 @@ def build_response(response, request):
     dict_obj['body'] = body
 
     return dict_obj
+
+
+PRIMITIVES = [int, bool, float, str, dict, list, type(None)]
+
+
+def cast_primitive(value):
+    if any(isinstance(value, typ) for typ in PRIMITIVES):
+        return value
+    return str(value)
+
+
+def follow_subrequest(request, subrequest, **kwargs):
+    """Run a subrequest (e.g. batch), and follow the redirection if any.
+
+    :rtype: tuple
+    :returns: the reponse and the redirection request (or `subrequest`
+              if no redirection happened.)
+    """
+    try:
+        try:
+            return request.invoke_subrequest(subrequest, **kwargs), subrequest
+        except Exception as e:
+            resp = render_view_to_response(e, subrequest)
+            if not resp or resp.status_code >= 500:
+                raise e
+            raise resp
+    except httpexceptions.HTTPRedirection as e:
+        new_location = e.headers['Location']
+        new_request = Request.blank(path=new_location,
+                                    headers=subrequest.headers,
+                                    POST=subrequest.body,
+                                    method=subrequest.method)
+        new_request.bound_data = subrequest.bound_data
+        new_request.parent = getattr(subrequest, 'parent', None)
+        return request.invoke_subrequest(new_request, **kwargs), new_request
 
 
 def merge_dicts(a, b):

@@ -3,8 +3,8 @@ class BaseError(Exception):
 
 
 class ModelInferenceException(BaseError):
-    def __init__(self, table=None):
-        self.table = table
+    def __init__(self, type_id=None):
+        self.type_id = type_id
 
 
 class ModelNotExists(ModelInferenceException):

@@ -4,19 +4,26 @@ from cornice import Service
 from cornice.resource import resource
 from cornice.validators import colander_validator, colander_body_validator
 from pyramid.decorator import reify
-from pyramid.httpexceptions import HTTPNotFound, HTTPBadRequest, HTTPException
+from pyramid.httpexceptions import (
+    HTTPNotFound,
+    HTTPBadRequest,
+    HTTPException,
+    HTTPUnauthorized,
+    HTTPForbidden,
+)
+from pyramid.security import ALL_PERMISSIONS, Allow, Authenticated
+from pyramid.view import forbidden_view_config
 
 from moisturizer.models import (
     DescriptorModel,
-    ModelNotExists,
-    UserModel,
     PermissionModel,
-    infer_model
+    UserModel,
 )
 from moisturizer.exceptions import format_http_error, parse_exception
 from moisturizer.schemas import (
     InferredTypeSchema,
     InferredObjectSchema,
+    UserSchema,
     BatchRequest
 )
 from moisturizer.utils import (
@@ -32,17 +39,15 @@ heartbeat = Service(name="server_info", path="/__heartbeat__")
 
 @heartbeat.get()
 def im_alive(request):
-    descriptor_key = request.registry.settings['moisturizer.descriptor_key']
-    user_key = request.registry.settings['moisturizer.user_key']
+    # descriptor_key = request.registry.settings['moisturizer.descriptor_key']
+    # user_key = request.registry.settings['moisturizer.user_key']
 
     try:
-        infer_model(descriptor_key)
         descriptors = True
     except Exception:
         descriptors = False
 
     try:
-        infer_model(user_key)
         users = True
     except Exception:
         users = False
@@ -54,19 +59,26 @@ def im_alive(request):
     }
 
 
+@forbidden_view_config()
+def forbidden_view(request):
+    if request.authenticated_userid is None:
+        raise format_http_error(HTTPUnauthorized, HTTPUnauthorized())
+    raise format_http_error(HTTPForbidden, HTTPUnauthorized())
+
+
 @resource(collection_path='/types/{type_id}/objects',
           path='/types/{type_id}/objects/{id}',
-          validators=('deserialize_model',))
+          validators=('deserialize_model',),
+          permission="authenticated",)
 class InferredObjectResource(object):
     ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH',)
 
     def __init__(self, request, context=None):
         self.request = request
-        self.type_id = self.request.matchdict.get('type_id')
-        self.id = self.request.matchdict.get('id')
         self.principals = (getattr(self.request, 'principals', None) or
                            self.request.effective_principals)
-        self.user = self.request.user
+
+    # Factory methods
 
     def deserialize_model(self, request, **kwargs):
         kwargs['schema'] = self.schema
@@ -74,16 +86,40 @@ class InferredObjectResource(object):
 
     @reify
     def schema(self):
-        return InferredObjectSchema().bind(type_id=self.type_id)
+        return InferredObjectSchema().bind(descriptor=self.descriptor)
+
+    # Subclass properties
+
+    @reify
+    def type_id(self):
+        return self.request.matchdict.get('type_id')
+
+    @reify
+    def id(self):
+        return self.request.matchdict.get('id')
+
+    @reify
+    def descriptor(self):
+        # First, we attempt to find a descriptor for the current model.
+        try:
+            return DescriptorModel.get(id=self.type_id)
+
+        # If not exists, check if we can create it.
+        except DescriptorModel.DoesNotExist as e:
+            if self.request.method not in self.ALLOW_WRITE_TO_SCHEMA:
+                raise format_http_error(HTTPForbidden, e)
+
+        return DescriptorModel.create(id=self.type_id)
+
+    def __acl__(self):
+        return (
+            (Allow, Authenticated, ALL_PERMISSIONS),
+        )
 
     @reify
     def Model(self):
-        """The Model representing the current resource. The model is inferred
-        at runtime by the given ``type_id``."""
-        try:
-            return infer_model(self.type_id, self.payload)
-        except ModelNotExists as e:
-            raise format_http_error(HTTPNotFound, e)
+        self.preprocess()
+        return self.descriptor.model
 
     @reify
     def query(self):
@@ -91,25 +127,28 @@ class InferredObjectResource(object):
 
     @reify
     def entry(self):
-        return self.Model.get(id=self.id)
+        try:
+            return self.Model.get(id=self.id)
+        except self.Model.DoesNotExist as e:
+            e.type_id = self.type_id
+            raise format_http_error(HTTPNotFound(), e)
 
     @reify
     def payload(self):
-        if self.request.method not in self.ALLOW_WRITE_TO_SCHEMA:
-            return
+        return self.request.validated
 
+    def preprocess(self):
+        # FIXME: move to schema.
         payload = self.request.validated or {}
-
         payload.setdefault('last_modified', datetime.datetime.now())
         if self.id is not None:
             payload.setdefault('id', self.id)
+        self.descriptor.infer_schema_change(payload)
+        self.request.validated = payload
 
-        return payload
-
-    @reify
     def permissions(self):
         # Admins can do wathever they want.
-        if self.user.role == UserModel.ROLE_ADMIN:
+        if self.request.user.role == UserModel.ROLE_ADMIN:
             return PermissionModel.admin
 
         try:
@@ -127,10 +166,9 @@ class InferredObjectResource(object):
 
     def collection_post(self):
         try:
-            new = self.Model.create(**self.request.validated)
+            new = self.Model.create(**self.payload)
         except Exception as e:
             raise format_http_error(HTTPBadRequest, e)
-
         return self.postprocess(new)
 
     def collection_get(self):
@@ -151,14 +189,9 @@ class InferredObjectResource(object):
         )
 
     def put(self):
-        Model = self.Model
-        try:
-            Model.objects.get(id=self.id).delete()
-        except Model.DoesNotExist:
-            pass
-
-        new = self.Model(**self.request.validated).save()
-        return self.postprocess(new)
+        obj = self.Model(**self.request.validated)
+        obj.save()
+        return self.postprocess(obj)
 
     def patch(self):
         self.entry.update(**self.payload)
@@ -176,25 +209,18 @@ class InferredObjectResource(object):
 
 @resource(collection_path='/types',
           path='/types/{id}',
-          validators=('deserialize_model',))
+          validators=('deserialize_model',),
+          permission="authenticated",)
 class InferredTypeResource(InferredObjectResource):
     ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH', 'DELETE',)
 
-    @reify
+    @property
     def schema(self):
-        return InferredTypeSchema().bind(type_id=self.type_id)
+        return InferredTypeSchema().bind(type_id=self.descriptor)
 
-    @reify
-    def Model(self):
-        return DescriptorModel
-
-    def deserialize_model(self, request, **kwargs):
-        kwargs['schema'] = InferredTypeSchema().bind()
-        return colander_body_validator(request, **kwargs)
-
-    @reify
+    @property
     def type_id(self):
-        return self.Model.__keyspace__
+        return 'descriptor_model'
 
     def collection_delete(self):
         return self.postprocess([
@@ -208,19 +234,26 @@ class InferredTypeResource(InferredObjectResource):
 
 @resource(collection_path='/users',
           path='/users/{id}',
-          validators=('deserialize_model',))
+          validators=('deserialize_model',),
+          permission="authenticated",)
 class UserResource(InferredObjectResource):
+    @reify
+    def schema(self):
+        return UserSchema().bind(descriptor=self.descriptor)
+
     @reify
     def Model(self):
         return UserModel
 
     @reify
     def type_id(self):
-        return self.Model.__keyspace__
+        return 'user_model'
 
 
 @resource(collection_path='/types/{type_id}/permissions',
-          path='/types/{type_id}/permissions/{id}',)
+          path='/types/{type_id}/permissions/{id}',
+          validators=('deserialize_model',),
+          permission="authenticated",)
 class TypePermissionResource(InferredObjectResource):
     @reify
     def Model(self):
@@ -248,12 +281,17 @@ class TypePermissionResource(InferredObjectResource):
 
 
 @resource(collection_path='/types/{type_id}/objects/{id}/permissions',
-          path='/types/{type_id}/objects/{id}/permissions/{owner_id}',)
+          path='/types/{type_id}/objects/{id}/permissions/{owner_id}',
+          validators=('deserialize_model',),
+          permission="authenticated",)
 class ObjectPermissionResource(InferredObjectResource):
-
     @reify
     def Model(self):
         return PermissionModel
+
+    def deserialize_model(self, request, **kwargs):
+        kwargs['schema'] = self.schema
+        return colander_body_validator(request, **kwargs)
 
     @reify
     def query(self):

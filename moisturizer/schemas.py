@@ -8,6 +8,32 @@ from moisturizer.utils import (
     merge_dicts
 )
 
+
+JSONSCHEMA_COLANDER_TYPE_MAPPER = {
+    ('string', None): colander.String,
+    ('number', None): colander.Decimal,
+    ('integer', None): colander.Integer,
+    ('boolean', None): colander.Boolean,
+    ('null', None): lambda **_: None,
+    ('string', 'date-time'): colander.DateTime,
+
+    ('string', 'uuid'): lambda **kwargs:
+        colander.String(**kwargs),
+
+    ('number', 'float'): colander.Float,
+    ('number', 'double'): colander.Float,
+
+    ('object', None): lambda **kwargs:
+        colander.Mapping(unknown='preserve', **kwargs),
+
+    ('object', 'descriptor'): lambda **kwargs:
+        colander.Mapping(unknown='preserve', **kwargs),
+
+    ('array', None): lambda **kwargs:
+        colander.Sequence(colander.String, **kwargs),
+}
+
+
 valid_http_method = colander.OneOf(('GET', 'HEAD', 'DELETE', 'TRACE',
                                     'POST', 'PUT', 'PATCH'))
 
@@ -25,14 +51,6 @@ def _check_string_values(node, cstruct):
         raise colander.invalid(node, error_msg)
 
 
-class DateTimeFloat(colander.DateTime):
-    def serialize(self, node, appstruct):
-        return str(appstruct)
-
-    def deserialize(self, node, cstruct):
-        return cstruct or node.missing()
-
-
 class InferredObjectSchema(colander.MappingSchema):
     id = colander.SchemaNode(colander.String(),
                              missing=colander.drop)
@@ -43,14 +61,9 @@ class InferredObjectSchema(colander.MappingSchema):
         return colander.Mapping(unknown='preserve')
 
     def _bind(self, kw):
-        type_id = kw.pop('type_id', None)
+        descriptor = kw.pop('descriptor', None)
 
-        if type_id is None:
-            return super()._bind(kw)
-
-        try:
-            descriptor = DescriptorModel.get(id=type_id)
-        except DescriptorModel.DoesNotExist:
+        if not descriptor:
             return super()._bind(kw)
 
         fields = {k: TypeField().as_schema_node(field)
@@ -61,22 +74,13 @@ class InferredObjectSchema(colander.MappingSchema):
 
         return super()._bind(kw)
 
+    def deserialize(self, cstruct):
+        return super().deserialize({k: v for k, v in cstruct.items()
+                                    if v is not None})
 
-JSONSCHEMA_COLANDER_TYPE_MAPPER = {
-    ('string', None): colander.String,
-    ('number', None): colander.Integer,
-    ('integer', None): colander.Integer,
-    ('boolean', None): colander.Boolean,
-    ('null', None): lambda **_: None,
-    ('object', None): colander.Mapping,
-    ('array', None): lambda **kwargs: colander.Sequence(colander.String,
-                                                        **kwargs),
-    ('string', 'date-time'): colander.DateTime,
-    ('string', 'uuid'): lambda **kwargs: colander.String(
-                                        validator=colander.uuid, **kwargs),
-    ('number', 'float'): colander.Float,
-    ('number', 'double'): colander.Float,
-}
+    def serialize(self, appstruct):
+        return super().serialize({k: v for k, v in appstruct.items()
+                                  if v is not None})
 
 
 class TypeField(colander.MappingSchema):
@@ -101,27 +105,26 @@ class TypeField(colander.MappingSchema):
     def schema_type(self):
         return colander.Mapping(unknown='ignore')
 
-    def serialize(self, appstruct):
-        return dict(appstruct.items())
-
-    def deserialize(self, cstruct):
-        return DescriptorFieldType(**super.deserialize(cstruct))
-
     def as_schema_node(self, appstruct):
         type_, format_ = appstruct.type, appstruct.format or None
         node = JSONSCHEMA_COLANDER_TYPE_MAPPER.get((type_, format_))
         missing = colander.required if appstruct.required else colander.drop
         return colander.SchemaNode(node(), missing=missing)
 
+    def serialize(self, appstruct):
+        return {k: v for k, v in appstruct.items() if v}
+
+    def deserialize(self, cstruct):
+        return DescriptorFieldType(**super().deserialize(cstruct))
+
 
 class TypeProperties(colander.MappingSchema):
-
     def schema_type(self):
         return colander.Mapping(unknown='raise')
 
     def deserialize(self, cstruct):
         if cstruct == colander.null:
-            return
+            return cstruct
         return {k: TypeField().deserialize(v) for k, v in cstruct.items()}
 
     def serialize(self, appstruct):
@@ -135,10 +138,26 @@ class InferredTypeSchema(InferredObjectSchema):
                                      default={})
 
     def deserialize(self, cstruct):
-        return DescriptorModel(**super().deserialize(cstruct))
+        properties = cstruct.get('properties', {})
+        return super().deserialize({
+            'properties': TypeProperties.deserialize(self, properties),
+            **{k: v for k, v in cstruct.items() if k != 'properties'}  # noqa
+        })
 
     def serialize(self, appstruct):
-        return super().serialize(dict(appstruct.items()))
+        properties = appstruct.properties
+        return super().serialize({
+            'properties': TypeProperties.serialize(self, properties),
+            **{k: v for k, v in appstruct.items() if k != 'properties'}  # noqa
+        })
+
+
+class UserSchema(InferredObjectSchema):
+
+    def serialize(self, appstruct):
+        return super().serialize({
+            k: v for k, v in appstruct.items() if k != '_password'
+        })
 
 
 class BatchRequestSchema(colander.MappingSchema):

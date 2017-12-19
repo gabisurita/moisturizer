@@ -1,11 +1,15 @@
 import os
 import logging
 
-import logmatic
-from pyramid.config import Configurator as BaseConfigurator, ConfigurationError
+from pyramid.config import Configurator, ConfigurationError
 from cassandra.cqlengine import connection, management, query
 
-from moisturizer.models import DescriptorModel, UserModel, PermissionModel
+from moisturizer.models import (
+    DescriptorModel,
+    DescriptorFieldType,
+    UserModel,
+    PermissionModel
+)
 
 
 REQUIRED_SETTINGS = [
@@ -14,9 +18,6 @@ REQUIRED_SETTINGS = [
 DEFAULT_SETTINGS = {
     'moisturizer.cassandra_cluster': '0.0.0.0',
     'moisturizer.keyspace': 'moisturizer',
-    'moisturizer.descriptor_key': '__table_descriptor__',
-    'moisturizer.user_key': '__users__',
-    'moisturizer.permission_key': '__permissions__',
 
     'moisturizer.read_only': False,
     'moisturizer.immutable_schema': False,
@@ -31,15 +32,6 @@ DEFAULT_SETTINGS = {
 
 
 logger = logging.getLogger('moisturizer')
-handler = logging.StreamHandler()
-handler.setFormatter(logmatic.JsonFormatter())
-
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
-
-class Configurator(BaseConfigurator):
-    pass
 
 
 def get_config_environ(name):
@@ -61,25 +53,20 @@ def migrate_metaschema(settings):
     """Creates if not exists the Table descriptor Model and ajust
     it to the current schema."""
 
-    descriptor_key = settings['moisturizer.descriptor_key']
-    user_key = settings['moisturizer.user_key']
-    permission_key = settings['moisturizer.permission_key']
     admin_id = settings['moisturizer.admin_id']
     admin_password = settings['moisturizer.admin_id']
     override_keyspace = settings['moisturizer.override_keyspace']
 
     if override_keyspace:
-        management.drop_keyspace(descriptor_key)
-        management.drop_keyspace(user_key)
+        management.drop_keyspace(settings['moisturizer.keyspace'])
+
+    management.create_keyspace_simple(settings['moisturizer.keyspace'],
+                                      replication_factor=1)
 
     # Create users
-    management.create_keyspace_simple(user_key, replication_factor=1)
-    UserModel.__keyspace__ = user_key
     management.sync_table(UserModel)
 
     # Create permissions
-    management.create_keyspace_simple(permission_key, replication_factor=1)
-    PermissionModel.__keyspace__ = permission_key
     management.sync_table(PermissionModel)
 
     # Create admin
@@ -93,19 +80,22 @@ def migrate_metaschema(settings):
         pass
 
     # Create descriptors
-    management.create_keyspace_simple(descriptor_key, replication_factor=1)
-    DescriptorModel.__keyspace__ = descriptor_key
     management.sync_table(DescriptorModel)
 
-    DescriptorModel.create(id=user_key)
-    DescriptorModel.create(id=descriptor_key)
-    DescriptorModel.create(id=permission_key)
+    DescriptorModel.create(id='descriptor_model', properties={
+        'properties': DescriptorFieldType(type='object',
+                                          format='descriptor'),
+    })
+    DescriptorModel.create(id='user_model', properties={
+        'api_key': DescriptorFieldType(type='string',
+                                       format='uuid'),
+    })
+    # DescriptorModel.create(id=PermissionModel.__keyspace__)
 
 
 def main(global_config, **settings):
     for name, value in DEFAULT_SETTINGS.items():
-        settings.setdefault(name, (get_config_environ(name) or
-                                   settings.get(name) or value))
+        settings.setdefault(name, get_config_environ(name) or value)
 
     for name in REQUIRED_SETTINGS:
         if settings.get(name) is None:

@@ -6,7 +6,6 @@ import uuid
 from cassandra.cqlengine import models, columns, management, usertype
 from pyramid.decorator import reify
 
-from moisturizer.exceptions import ModelNotExists
 from moisturizer.utils import cast_primitive
 
 
@@ -15,6 +14,8 @@ NATIVE_JSONSCHEMA_TYPE_MAPPER = {
     int: ('integer', None),
     float: ('number', None),
     str: ('string', None),
+    dict: ('object', None),
+    list: ('array', None),
 }
 
 JSONSCHEMA_CQL_TYPE_MAPPER = {
@@ -23,15 +24,20 @@ JSONSCHEMA_CQL_TYPE_MAPPER = {
     ('integer', None): columns.Integer,
     ('boolean', None): columns.Boolean,
     ('null', None): lambda **_: None,
-    ('object', None): lambda **kwargs: columns.Map(columns.String,
-                                                   columns.String,
-                                                   **kwargs),
-    ('array', None): lambda **kwargs: columns.list(columns.String,
-                                                   **kwargs),
     ('string', 'date-time'): columns.DateTime,
     ('string', 'uuid'): columns.UUID,
     ('number', 'float'): columns.Float,
     ('number', 'double'): columns.Double,
+
+    ('object', None): lambda **kwargs:
+        columns.Map(columns.Text(), columns.Text(), **kwargs),
+
+    ('object', 'descriptor'): lambda **kwargs:
+        columns.Map(columns.Text(),
+                    columns.UserDefinedType(DescriptorFieldType), **kwargs),
+
+    ('array', None): lambda **kwargs:
+        columns.list(columns.Text(), **kwargs),
 }
 
 
@@ -43,7 +49,6 @@ DEFAULT_CQL_TYPE = columns.Text
 
 
 logger = logging.getLogger("moisturizer.models")
-logger.setLevel(logging.DEBUG)
 
 
 class InferredModel(models.Model):
@@ -54,7 +59,7 @@ class InferredModel(models.Model):
     extending and creating custom inferred models.
     """
     id = columns.Text(primary_key=True,
-                      default=lambda: str(uuid.uuid4()))
+                      default=lambda: str(uuid.uuid4().hex))
     last_modified = columns.DateTime(index=True,
                                      default=datetime.datetime.now)
 
@@ -72,7 +77,7 @@ class InferredModel(models.Model):
         """Builds an InferredModel child class from a descriptor object.
         """
 
-        Model = type('Model', (cls, ), {'__keyspace__': descriptor.id})
+        Model = type(descriptor.id, (cls,), {})
         for name, field in descriptor.properties.items():
 
             # Ignore explicitly declared fields
@@ -104,8 +109,9 @@ class DescriptorFieldType(usertype.UserType):
         return field(
             primary_key=self.primary_key,
             partition_key=self.partition_key,
-            index=self.index_,
+            index=self.index,
             required=self.required,
+            default=None,
         )
 
 
@@ -115,6 +121,13 @@ class DescriptorModel(InferredModel):
 
     def __init__(self, *args,  **kwargs):
         super().__init__(*args, **kwargs)
+        self.set_default_properties()
+
+    @property
+    def schema(self):
+        return {k: v.as_column() for k, v in self.properties.items()}
+
+    def set_default_properties(self):
         self.properties.update(**{
             'id': DescriptorFieldType(type='string',
                                       format='',
@@ -122,12 +135,8 @@ class DescriptorModel(InferredModel):
                                       partition_key=True),
             'last_modified': DescriptorFieldType(type='string',
                                                  format='date-time',
-                                                 index=True)
+                                                 index=True),
         })
-
-    @property
-    def schema(self):
-        return {k: v.as_column() for k, v in self.properties.items()}
 
     def infer_schema_change(self, object_):
         new_fields = {k: DescriptorFieldType.from_value(v)
@@ -141,17 +150,31 @@ class DescriptorModel(InferredModel):
         })
 
         self.properties.update(**new_fields)  # noqa
+        self.save()
+        management.sync_table(self.model)
         return new_fields
 
     @classmethod
     def create(cls, *args, **kwargs):
-        created = super().create(*args, **kwargs)
-        management.create_keyspace_simple(created.id, replication_factor=1)
+        created = cls(*args, **kwargs)
+        logger.info('Creating schema.', extra={
+            'type_id': created.id,
+        })
+        created.set_default_properties()
+        created.save()
+        management.sync_table(created.model)
         return created
 
-    def delete(self):
-        management.drop_keyspace(self.id)
-        return super().delete()
+    def save(self, **kwargs):
+        logger.info('Updating schema.', extra={
+            'type_id': self.id,
+        })
+        management.sync_table(self.model)
+        return super().save(**kwargs)
+
+    @property
+    def model(self):
+        return InferredModel.from_descriptor(self)
 
 
 class UserModel(InferredModel):
@@ -159,7 +182,7 @@ class UserModel(InferredModel):
     ROLE_ADMIN = 'admin'
 
     _password = columns.Ascii(required=True)
-    api_key = columns.UUID(default=uuid.uuid4)
+    api_key = columns.Text(default=lambda: str(uuid.uuid4().hex))
     role = columns.Text(default=ROLE_USER, index=True)
 
     def __init__(self, *args, **kwargs):
@@ -167,10 +190,13 @@ class UserModel(InferredModel):
         plain_password = kwargs.get('password')
         self.process_plain_password(plain_password)
 
-    def create(self, *args, **kwargs):
-        super().create(*args, **kwargs)
+    @classmethod
+    def create(cls, *args, **kwargs):
+        created = cls(*args, **kwargs)
         plain_password = kwargs.get('password')
-        self.process_plain_password(plain_password)
+        created.process_plain_password(plain_password)
+        created.save()
+        return created
 
     def process_plain_password(self, plain_password):
         if plain_password:
@@ -188,7 +214,6 @@ class UserModel(InferredModel):
 
 
 class PermissionModel(models.Model):
-    __keyspace__ = '__permissions__'
 
     id = columns.Text(partition_key=True)
     type_id = columns.Text(partition_key=True)
@@ -217,7 +242,7 @@ def create_model(type_id, payload=None):
     descriptor = DescriptorModel.create(id=type_id)
 
     # Force the first sync.
-    Model = type('Model', (InferredModel, ), {'__keyspace__': type_id})
+    Model = type(descriptor.id, (InferredModel,), {})
     management.sync_table(Model)
 
     return descriptor
@@ -234,20 +259,8 @@ def inspect_schema_change(payload):
             in payload.items() if value is not None}
 
 
-def infer_model(type_id, payload=None):
+def mutate_model(descriptor, payload=None):
     """This is where magic happens!"""
-
-    # First, we attempt to find a descriptor for the current model.
-    try:
-        descriptor = DescriptorModel.get(id=type_id)
-
-    # If not exists, check if we can create it.
-    except DescriptorModel.DoesNotExist:
-        if payload is None:
-            raise ModelNotExists(type_id=type_id)
-
-        descriptor = DescriptorModel(id=type_id)
-
     if payload is None:
         return InferredModel.from_descriptor(descriptor)
 

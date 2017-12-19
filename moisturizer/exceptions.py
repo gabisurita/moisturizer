@@ -20,8 +20,8 @@ class AuthenticationError(ModelInferenceException):
 def parse_exception(exception):
     return {
         'message': str(exception),
-        'table': getattr(exception, 'table', None),
-        'type': exception.__class__.__name__,
+        'type': getattr(exception, 'type_id', None),
+        'error_code': exception.__class__.__name__,
     }
 
 

@@ -70,7 +70,7 @@ def forbidden_view(request):
           path='/types/{type_id}/objects/{id}',
           validators=('deserialize_model',),
           permission="authenticated",)
-class InferredObjectResource(object):
+class ObjectResource(object):
     ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH',)
 
     def __init__(self, request, context=None):
@@ -86,7 +86,14 @@ class InferredObjectResource(object):
 
     @reify
     def schema(self):
+        """Returns the schema for the current type."""
         return InferredObjectSchema().bind(descriptor=self.descriptor)
+
+    def __acl__(self):
+        """ACL permissions for the current resource."""
+        return (
+            (Allow, Authenticated, ALL_PERMISSIONS),
+        )
 
     # Subclass properties
 
@@ -100,6 +107,12 @@ class InferredObjectResource(object):
 
     @reify
     def descriptor(self):
+        """
+        (moisturizer.models.DescriptorModel): Type descriptor of the
+        current table. May create a new descriptor if not existing and
+        schema changes are allowed.
+        """
+
         # First, we attempt to find a descriptor for the current model.
         try:
             return DescriptorModel.get(id=self.type_id)
@@ -111,13 +124,12 @@ class InferredObjectResource(object):
 
         return DescriptorModel.create(id=self.type_id)
 
-    def __acl__(self):
-        return (
-            (Allow, Authenticated, ALL_PERMISSIONS),
-        )
-
     @reify
     def Model(self):
+        """
+        (moisturizer.models.InferredModel): Model matching the given
+        type decriptor. May be used as storage abstraction.
+        """
         self.preprocess()
         return self.descriptor.model
 
@@ -140,11 +152,9 @@ class InferredObjectResource(object):
     def preprocess(self):
         # FIXME: move to schema.
         payload = self.schema.flatten(self.request.validated) or {}
-        payload.setdefault('last_modified', datetime.datetime.now())
         if self.id is not None:
             payload.setdefault('id', self.id)
         self.descriptor.infer_schema_change(payload)
-        print(payload)
         self.request.validated = payload
 
     def permissions(self):
@@ -213,7 +223,7 @@ class InferredObjectResource(object):
           path='/types/{id}',
           validators=('deserialize_model',),
           permission="authenticated",)
-class InferredTypeResource(InferredObjectResource):
+class InferredTypeResource(ObjectResource):
     ALLOW_WRITE_TO_SCHEMA = ('POST', 'PUT', 'PATCH', 'DELETE',)
 
     @property
@@ -238,7 +248,7 @@ class InferredTypeResource(InferredObjectResource):
           path='/users/{id}',
           validators=('deserialize_model',),
           permission="authenticated",)
-class UserResource(InferredObjectResource):
+class UserResource(ObjectResource):
     @reify
     def schema(self):
         return UserSchema().bind(descriptor=self.descriptor)
@@ -256,7 +266,7 @@ class UserResource(InferredObjectResource):
           path='/types/{type_id}/permissions/{id}',
           validators=('deserialize_model',),
           permission="authenticated",)
-class TypePermissionResource(InferredObjectResource):
+class TypePermissionResource(ObjectResource):
     @reify
     def Model(self):
         return PermissionModel
@@ -286,7 +296,7 @@ class TypePermissionResource(InferredObjectResource):
           path='/types/{type_id}/objects/{id}/permissions/{owner_id}',
           validators=('deserialize_model',),
           permission="authenticated",)
-class ObjectPermissionResource(InferredObjectResource):
+class ObjectPermissionResource(ObjectResource):
     @reify
     def Model(self):
         return PermissionModel

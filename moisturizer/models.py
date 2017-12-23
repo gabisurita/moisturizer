@@ -28,10 +28,6 @@ JSONSCHEMA_CQL_TYPE_MAPPER = {
     ('string', 'uuid'): columns.UUID,
     ('number', 'float'): columns.Float,
     ('number', 'double'): columns.Double,
-
-    ('object', None): lambda **kwargs:
-        columns.Map(columns.Text(), columns.Text(), **kwargs),
-
     ('object', 'descriptor'): lambda **kwargs:
         columns.Map(columns.Text(),
                     columns.UserDefinedType(DescriptorFieldType), **kwargs),
@@ -127,6 +123,10 @@ class DescriptorModel(InferredModel):
     def schema(self):
         return {k: v.as_column() for k, v in self.properties.items()}
 
+    @property
+    def model(self):
+        return InferredModel.from_descriptor(self)
+
     def set_default_properties(self):
         self.properties.update(**{
             'id': DescriptorFieldType(type='string',
@@ -172,9 +172,12 @@ class DescriptorModel(InferredModel):
         management.sync_table(self.model)
         return super().save(**kwargs)
 
-    @property
-    def model(self):
-        return InferredModel.from_descriptor(self)
+    def delete(self, **kwargs):
+        logger.info('Deleting schema.', extra={
+            'type_id': self.id,
+        })
+        management.drop_table(self.model)
+        return super().delete(**kwargs)
 
 
 class UserModel(InferredModel):
@@ -232,43 +235,3 @@ class PermissionModel(models.Model):
             can_update=True,
             can_delete=True,
         )
-
-    def serialize(self):
-        return {k: cast_primitive(v) for k, v in self.items()}
-
-
-def create_model(type_id, payload=None):
-    logger.info('Creating new descriptor.', extra={'type_id': type_id})
-    descriptor = DescriptorModel.create(id=type_id)
-
-    # Force the first sync.
-    Model = type(descriptor.id, (InferredModel,), {})
-    management.sync_table(Model)
-
-    return descriptor
-
-
-def infer_value_type(value):
-    for native, type_ in NATIVE_JSONSCHEMA_TYPE_MAPPER.items():
-        if isinstance(value, native):
-            return JSONSCHEMA_CQL_TYPE_MAPPER.get(type_)
-
-
-def inspect_schema_change(payload):
-    return {key: infer_value_type(value) for key, value
-            in payload.items() if value is not None}
-
-
-def mutate_model(descriptor, payload=None):
-    """This is where magic happens!"""
-    if payload is None:
-        return InferredModel.from_descriptor(descriptor)
-
-    has_change = descriptor.infer_schema_change(payload)
-    Model = InferredModel.from_descriptor(descriptor)
-
-    if has_change:
-        descriptor.save()
-        management.sync_table(Model)
-
-    return Model

@@ -139,11 +139,12 @@ class InferredObjectResource(object):
 
     def preprocess(self):
         # FIXME: move to schema.
-        payload = self.request.validated or {}
+        payload = self.schema.flatten(self.request.validated) or {}
         payload.setdefault('last_modified', datetime.datetime.now())
         if self.id is not None:
             payload.setdefault('id', self.id)
         self.descriptor.infer_schema_change(payload)
+        print(payload)
         self.request.validated = payload
 
     def permissions(self):
@@ -203,8 +204,9 @@ class InferredObjectResource(object):
 
     def postprocess(self, result):
         if isinstance(result, list):
-            return [self.schema.serialize(e) for e in result]
-        return self.schema.serialize(result)
+            return [self.schema.serialize(self.schema.unflatten(e))
+                    for e in result]
+        return self.schema.serialize(self.schema.unflatten(result))
 
 
 @resource(collection_path='/types',

@@ -74,6 +74,36 @@ class InferredObjectSchema(colander.MappingSchema):
 
         return super()._bind(kw)
 
+    def flatten(self, nested):
+        def flatten_dict(d, separator='.'):
+            def items():
+                for key, value in d.items():
+                    if isinstance(value, dict):
+                        for subkey, subvalue in flatten_dict(value).items():
+                            yield "{}{}{}".format(key,
+                                                  separator,
+                                                  subkey), subvalue
+                    else:
+                        yield key, value
+            return dict(items())
+
+        return flatten_dict(nested)
+
+    def unflatten(self, flatten):
+        def unflatten_dict(d, separator='.'):
+            resultDict = dict()
+            for key, value in d.items():
+                parts = key.split(separator)
+                d = resultDict
+                for part in parts[:-1]:
+                    if part not in d:
+                        d[part] = dict()
+                    d = d[part]
+                d[parts[-1]] = value
+            return resultDict
+
+        return unflatten_dict(flatten)
+
     def deserialize(self, cstruct):
         return super().deserialize({k: v for k, v in cstruct.items()
                                     if v is not None})

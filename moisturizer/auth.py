@@ -7,6 +7,10 @@ from moisturizer.models import UserModel
 
 
 def check_user(id, key, request):
+
+    if hasattr(request, 'user'):
+        return [request.user.role]
+
     if id is not None:
         try:
             user = UserModel.objects.get(id=id)

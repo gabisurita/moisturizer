@@ -1,11 +1,12 @@
 import colander
 
 from moisturizer.models import (
-    DescriptorModel,
     DescriptorFieldType,
 )
 from moisturizer.utils import (
-    merge_dicts
+    merge_dicts,
+    flatten_dict,
+    unflatten_dict,
 )
 
 
@@ -75,33 +76,9 @@ class InferredObjectSchema(colander.MappingSchema):
         return super()._bind(kw)
 
     def flatten(self, nested):
-        def flatten_dict(d, separator='.'):
-            def items():
-                for key, value in d.items():
-                    if isinstance(value, dict):
-                        for subkey, subvalue in flatten_dict(value).items():
-                            yield "{}{}{}".format(key,
-                                                  separator,
-                                                  subkey), subvalue
-                    else:
-                        yield key, value
-            return dict(items())
-
         return flatten_dict(nested)
 
     def unflatten(self, flatten):
-        def unflatten_dict(d, separator='.'):
-            resultDict = dict()
-            for key, value in d.items():
-                parts = key.split(separator)
-                d = resultDict
-                for part in parts[:-1]:
-                    if part not in d:
-                        d[part] = dict()
-                    d = d[part]
-                d[parts[-1]] = value
-            return resultDict
-
         return unflatten_dict(flatten)
 
     def deserialize(self, cstruct):
@@ -175,15 +152,21 @@ class InferredTypeSchema(InferredObjectSchema):
         })
 
     def serialize(self, appstruct):
-        properties = appstruct.properties
+        properties = appstruct.get('properties', {})
         return super().serialize({
             'properties': TypeProperties.serialize(self, properties),
             **{k: v for k, v in appstruct.items() if k != 'properties'}  # noqa
         })
 
+    def flatten(self, appstruct):
+        properties = appstruct.pop('properties')
+        return {
+            'properties': properties,
+            **super().flatten(appstruct)
+        }
+
 
 class UserSchema(InferredObjectSchema):
-
     def serialize(self, appstruct):
         return super().serialize({
             k: v for k, v in appstruct.items() if k != '_password'

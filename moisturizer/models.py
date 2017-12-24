@@ -217,7 +217,6 @@ class UserModel(InferredModel):
 
 
 class PermissionModel(models.Model):
-
     id = columns.Text(partition_key=True)
     type_id = columns.Text(partition_key=True)
     owner = columns.Text(partition_key=True)

@@ -1,19 +1,21 @@
 import pytest
 
-from pyramid import httpexceptions
 from webtest import TestApp as WebTestApp  # fix pytest import issue
 from cassandra.cqlengine import management
 
 from moisturizer import main
+from moisturizer.models import UserModel
 
 
-@pytest.fixture()
+@pytest.fixture(scope='module')
 def test_app():
     app = WebTestApp(main({}, **{
         'moisturizer.keyspace': 'test',
     }))
-    app.authorization = ('Basic', ('admin', 'admin'))
+    admin = UserModel.get(id='admin')
+    app.authorization = ('Basic', (admin.id, admin.api_key))
     yield app
+    # Ensure recriation, but make tests REALLY slow!
     management.drop_keyspace('test')
 
 
@@ -45,6 +47,11 @@ def invalid_type_payload():
     return {'foo': 12, 'number': 42}
 
 
+@pytest.fixture()
+def valid_user_payload():
+    return {'role': 'user', 'password': 'my_secret'}
+
+
 def test_heartbeat(test_app):
     data = test_app.get('/__heartbeat__', status=200).json
     assert data['server']
@@ -56,6 +63,8 @@ type_collection = '/types'
 type_endpoint = '/types/{}'
 object_collection = '/types/my_type/objects'
 object_endpoint = '/types/my_type/objects/{}'
+user_collection = '/users'
+user_endpoint = '/users/{}'
 
 
 def assert_response(payload, reponse):
@@ -99,13 +108,13 @@ def test_object_list(test_app, valid_object_payload):
                        status=200).json
 
     data = test_app.get(object_collection, status=200).json
-    assert len(data) == 1
+    assert len(data) > 1
     assert_response(valid_object_payload, data[0])
 
 
 def test_object_list_on_not_existing(test_app):
-    with pytest.raises(httpexceptions.HTTPForbidden):
-        test_app.get(object_collection, status=403).json
+    object_collection = '/types/my_other_nonexisting_type/objects'
+    test_app.get(object_collection, status=403).json
 
 
 def test_object_list_on_deleted(test_app, valid_object_payload):
@@ -113,7 +122,7 @@ def test_object_list_on_deleted(test_app, valid_object_payload):
                        valid_object_payload,
                        status=200)
     data = test_app.get(object_collection, status=200).json
-    assert len(data) == 1
+    assert len(data) > 1
     data = test_app.delete(object_collection, status=200).json
     assert_response(valid_object_payload, data[0])
     data = test_app.get(object_collection, status=200).json
@@ -176,6 +185,14 @@ def test_object_patch_edits(test_app, valid_object_payload):
         assert data['last_modified'] > initial_data['last_modified']
 
 
+def test_object_delete(test_app, valid_object_payload):
+        test_app.put_json(object_endpoint.format('42'),
+                          valid_object_payload,
+                          status=200)
+        data = test_app.delete(object_endpoint.format('42')).json
+        assert_response(valid_object_payload, data)
+
+
 def test_type_create(test_app, valid_type_payload):
     data = test_app.post_json(type_collection,
                               valid_type_payload,
@@ -218,3 +235,32 @@ def test_type_migration(test_app, valid_type_payload,
     test_app.post_json(object_collection,
                        valid_object_payload,
                        status=200).json
+
+
+def test_admin_get(test_app):
+    data = test_app.get(user_endpoint.format('admin')).json
+    assert data.get('api_key')
+    assert not data.get('password')
+    assert not data.get('_password')
+
+
+def test_user_create(test_app, valid_user_payload):
+    data = test_app.post_json(user_collection,
+                              valid_user_payload,
+                              status=200).json
+
+    assert data.get('api_key')
+
+
+def test_user_list(test_app, valid_user_payload):
+    data = test_app.get(user_collection, status=200).json
+    assert len(data) > 0
+
+
+def test_user_delete(test_app, valid_user_payload):
+    initial_data = test_app.post_json(user_collection,
+                                      valid_user_payload,
+                                      status=200).json
+
+    data = test_app.delete(user_endpoint.format(initial_data['id'])).json
+    assert data.get('api_key')

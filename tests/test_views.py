@@ -15,8 +15,12 @@ def test_app():
     admin = UserModel.get(id='admin')
     app.authorization = ('Basic', (admin.id, admin.api_key))
     yield app
+
     # Ensure recriation, but make tests REALLY slow!
-    management.drop_keyspace('test')
+    async def finish():
+        management.drop_keyspace('test')
+
+    finish()
 
 
 @pytest.fixture()

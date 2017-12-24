@@ -12,16 +12,12 @@ from pyramid.httpexceptions import (
     HTTPForbidden,
 )
 from pyramid.security import ALL_PERMISSIONS, Allow, Authenticated
-from pyramid.view import (
-    forbidden_view_config,
-    notfound_view_config,
-)
 from moisturizer.models import (
     DescriptorModel,
     PermissionModel,
     UserModel,
 )
-from moisturizer.exceptions import format_http_error, parse_exception
+from moisturizer.errors import format_http_error, parse_exception
 from moisturizer.schemas import (
     InferredTypeSchema,
     InferredObjectSchema,
@@ -59,18 +55,6 @@ def im_alive(request):
         "schema": descriptors,
         "users": users,
     }
-
-
-@forbidden_view_config()
-def forbidden_view(request):
-    if request.authenticated_userid is None:
-        return format_http_error(HTTPUnauthorized, HTTPUnauthorized())
-    return format_http_error(HTTPForbidden, HTTPUnauthorized())
-
-
-@notfound_view_config()
-def notfound_view(request):
-    return format_http_error(HTTPNotFound, HTTPNotFound())
 
 
 @resource(collection_path='/types/{type_id}/objects',
@@ -202,9 +186,8 @@ class ObjectResource(object):
         return self.postprocess(self.entry)
 
     def delete(self):
-        return self.postprocess(
-            self._serialize_and_delete(self.entry)
-        )
+        self.entry.delete()
+        return self.postprocess(self.entry)
 
     def put(self):
         obj = self.Model(**self.request.validated)

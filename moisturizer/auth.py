@@ -2,12 +2,11 @@ from pyramid.authentication import BasicAuthAuthenticationPolicy
 from pyramid.authorization import ACLAuthorizationPolicy
 from pyramid.httpexceptions import HTTPUnauthorized
 
-from moisturizer.exceptions import AuthenticationError, format_http_error
+from moisturizer.errors import AuthenticationError, format_http_error
 from moisturizer.models import UserModel
 
 
 def check_user(id, key, request):
-
     if hasattr(request, 'user'):
         return [request.user.role]
 

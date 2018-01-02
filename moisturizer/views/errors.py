@@ -14,7 +14,7 @@ from moisturizer.errors import format_http_error
 def forbidden_view(request):
     if request.authenticated_userid is None:
         return format_http_error(HTTPUnauthorized, HTTPUnauthorized())
-    return format_http_error(HTTPForbidden, HTTPUnauthorized())
+    return format_http_error(HTTPForbidden, HTTPForbidden())
 
 
 @notfound_view_config()

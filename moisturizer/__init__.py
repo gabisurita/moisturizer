@@ -71,7 +71,7 @@ def migrate_metaschema(settings):
 
     # Create admin
     try:
-        UserModel.objects.if_not_exists().create(
+        UserModel.create(
             id=admin_id,
             password=admin_password,
             role=UserModel.ROLE_ADMIN,
@@ -88,9 +88,8 @@ def migrate_metaschema(settings):
     })
     DescriptorModel.create(id='user_model', properties={
         'api_key': DescriptorFieldType(type='string',
-                                       format='uuid'),
+                                       format=''),
     })
-    # DescriptorModel.create(id=PermissionModel.__keyspace__)
 
 
 def main(global_config, **settings):

@@ -52,28 +52,11 @@ def _check_string_values(node, cstruct):
         raise colander.invalid(node, error_msg)
 
 
-class InferredObjectSchema(colander.MappingSchema):
-    id = colander.SchemaNode(colander.String(),
-                             missing=colander.drop)
-    last_modified = colander.SchemaNode(colander.DateTime(default_tzinfo=None),
-                                        missing=colander.drop)
+class BaseMappingSchema(colander.MappingSchema):
+    """Base schema to (de)serialize objects inherited from BaseResource."""
 
     def schema_type(self):
         return colander.Mapping(unknown='preserve')
-
-    def _bind(self, kw):
-        descriptor = kw.pop('descriptor', None)
-
-        if not descriptor:
-            return super()._bind(kw)
-
-        fields = {k: TypeField().as_schema_node(field)
-                  for k, field in descriptor.properties.items()}
-
-        for k, v in fields.items():
-            self[k] = v
-
-        return super()._bind(kw)
 
     def flatten(self, nested):
         return flatten_dict(nested)
@@ -88,6 +71,27 @@ class InferredObjectSchema(colander.MappingSchema):
     def serialize(self, appstruct):
         return super().serialize({k: v for k, v in appstruct.items()
                                   if v is not None})
+
+
+class InferredObjectSchema(BaseMappingSchema):
+    id = colander.SchemaNode(colander.String(),
+                             missing=colander.drop)
+    last_modified = colander.SchemaNode(colander.DateTime(default_tzinfo=None),
+                                        missing=colander.drop)
+
+    def _bind(self, kw):
+        descriptor = kw.pop('descriptor', None)
+
+        if descriptor is None:
+            return super()._bind(kw)
+
+        fields = {k: TypeField().as_schema_node(field)
+                  for k, field in descriptor.properties.items()}
+
+        for k, v in fields.items():
+            self[k] = v
+
+        return super()._bind(kw)
 
 
 class TypeField(colander.MappingSchema):
@@ -173,6 +177,22 @@ class UserSchema(InferredObjectSchema):
         })
 
 
+class PermissionSchema(BaseMappingSchema):
+    id = colander.String()
+    read = colander.Boolean()
+    write = colander.Boolean()
+    create = colander.Boolean()
+
+    def deserialize(self, cstruct):
+        deserialized = super().deserialize(cstruct)
+        deserialized['create_'] = deserialized.pop('create', False)
+        return deserialized
+
+    def serialize(self, appstruct):
+        appstruct['create'] = appstruct.pop('create_', False)
+        return super().serialize(appstruct)
+
+
 class BatchRequestSchema(colander.MappingSchema):
     method = colander.SchemaNode(colander.String(),
                                  validator=valid_http_method,
@@ -222,7 +242,6 @@ class BatchRequest(colander.MappingSchema):
 
 
 def monkey_patch_colander():
-
     # Recover boolean values which were coerced into strings.
     serialize_boolean = getattr(colander.Boolean, 'serialize')
 

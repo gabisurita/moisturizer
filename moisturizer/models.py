@@ -4,9 +4,6 @@ import logging
 import uuid
 
 from cassandra.cqlengine import models, columns, management, usertype
-from pyramid.decorator import reify
-
-from moisturizer.utils import cast_primitive
 
 
 NATIVE_JSONSCHEMA_TYPE_MAPPER = {
@@ -47,6 +44,9 @@ DEFAULT_CQL_TYPE = columns.Text
 logger = logging.getLogger("moisturizer.models")
 
 
+DoesNotExist = models.BaseModel.DoesNotExist
+
+
 class InferredModel(models.Model):
     """
     Abstract class for inferred type models.
@@ -58,6 +58,7 @@ class InferredModel(models.Model):
                       default=lambda: str(uuid.uuid4().hex))
     last_modified = columns.DateTime(index=True,
                                      default=datetime.datetime.now)
+    owner = columns.Text(index=True)
 
     @classmethod
     def add_column(cls, name, column_type):
@@ -70,7 +71,8 @@ class InferredModel(models.Model):
 
     @classmethod
     def from_descriptor(cls, descriptor):
-        """Builds an InferredModel child class from a descriptor object.
+        """
+        Builds an InferredModel child class from a descriptor object.
         """
 
         Model = type(descriptor.id, (cls,), {})
@@ -145,23 +147,26 @@ class DescriptorModel(InferredModel):
         if not new_fields:
             return
 
+        self.properties.update(**new_fields)  # noqa
+        self.save()
+
         logger.info('Mutating schema.', extra={
             'type_id': self.id,
         })
 
-        self.properties.update(**new_fields)  # noqa
-        self.save()
         management.sync_table(self.model)
         return new_fields
 
     @classmethod
     def create(cls, *args, **kwargs):
         created = cls(*args, **kwargs)
+        created.set_default_properties()
+        created.save()
+
         logger.info('Creating schema.', extra={
             'type_id': created.id,
         })
-        created.set_default_properties()
-        created.save()
+
         management.sync_table(created.model)
         return created
 
@@ -169,6 +174,7 @@ class DescriptorModel(InferredModel):
         logger.info('Updating schema.', extra={
             'type_id': self.id,
         })
+
         management.sync_table(self.model)
         return super().save(**kwargs)
 
@@ -176,6 +182,7 @@ class DescriptorModel(InferredModel):
         logger.info('Deleting schema.', extra={
             'type_id': self.id,
         })
+
         management.drop_table(self.model)
         return super().delete(**kwargs)
 
@@ -188,6 +195,10 @@ class UserModel(InferredModel):
     api_key = columns.Text(default=lambda: str(uuid.uuid4().hex))
     role = columns.Text(default=ROLE_USER, index=True)
 
+    @property
+    def permissions(self):
+        return PermissionModel.for_user(self)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         plain_password = kwargs.get('password')
@@ -199,7 +210,12 @@ class UserModel(InferredModel):
         plain_password = kwargs.get('password')
         created.process_plain_password(plain_password)
         created.save()
+        management.sync_table(created.permissions)
         return created
+
+    def delete(self, **kwargs):
+        management.drop_table(self.permissions)
+        return super().delete(**kwargs)
 
     def process_plain_password(self, plain_password):
         if plain_password:
@@ -211,26 +227,24 @@ class UserModel(InferredModel):
         return bcrypt.checkpw(given_password.encode('utf-8'),
                               self._password.encode('utf-8'))
 
-    def serialize(self):
-        return {k: cast_primitive(v) for k, v in self.items()
-                if k != '_password'}
-
 
 class PermissionModel(models.Model):
     id = columns.Text(partition_key=True)
-    type_id = columns.Text(partition_key=True)
-    owner = columns.Text(partition_key=True)
+    read = columns.Boolean(default=False)
+    write = columns.Boolean(default=False)
+    create_ = columns.Boolean(default=False)
 
-    can_read = columns.Boolean(default=False)
-    can_create = columns.Boolean(default=False)
-    can_update = columns.Boolean(default=False)
-    can_delete = columns.Boolean(default=False)
-
-    @reify
+    @classmethod
     def admin(self):
         return PermissionModel(
-            can_read=True,
-            can_create=True,
-            can_update=True,
-            can_delete=True,
+            read=True,
+            write=True,
+            create_=True,
         )
+
+    @classmethod
+    def for_user(cls, user):
+        """
+        Builds a PermissionModel child class from an user object.
+        """
+        return type('{}_permissions'.format(user.id), (cls,), {})

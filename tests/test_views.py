@@ -39,6 +39,15 @@ def authorized_app():
 
 
 @pytest.fixture()
+def user_auth(authorized_app, test_user):
+    base_auth = authorized_app.authorization
+    user = UserModel.get(id=test_user['id'])
+    authorized_app.authorization = ('Basic', (user.id, user.api_key))
+    yield test_user
+    authorized_app.authorization = base_auth
+
+
+@pytest.fixture()
 def valid_object_payload():
     return {'foo': 'bar', 'number': 42}
 
@@ -76,9 +85,35 @@ def valid_user_payload():
 
 
 @pytest.fixture()
-def read_only_permissions_payload(test_type):
+def read_only_permissions_payload():
     return {
         'read': True,
+        'id': 'my_type'
+    }
+
+
+@pytest.fixture()
+def create_only_permissions_payload():
+    return {
+        'create': True,
+        'id': 'my_type'
+    }
+
+
+@pytest.fixture()
+def write_only_permissions_payload():
+    return {
+        'write': True,
+        'id': 'my_type'
+    }
+
+
+@pytest.fixture()
+def full_permissions_payload():
+    return {
+        'read': True,
+        'create': True,
+        'write': True,
         'id': 'my_type'
     }
 
@@ -105,11 +140,44 @@ def test_user(authorized_app, valid_user_payload):
 
 
 @pytest.fixture()
-def test_read_only_object(authorized_app, test_object, test_user,
-                          read_only_permissions_payload):
+def sample_read_only_object(authorized_app, test_object, test_user,
+                            read_only_permissions_payload):
     authorized_app.post_json(
         permissions_collection.format(test_user['id']),
         read_only_permissions_payload,
+        status=200
+    )
+    return test_object
+
+
+@pytest.fixture()
+def sample_create_only_object(authorized_app, test_object, test_user,
+                              create_only_permissions_payload):
+    authorized_app.post_json(
+        permissions_collection.format(test_user['id']),
+        create_only_permissions_payload,
+        status=200
+    )
+    return test_object
+
+
+@pytest.fixture()
+def sample_write_only_object(authorized_app, test_object, test_user,
+                             write_only_permissions_payload):
+    authorized_app.post_json(
+        permissions_collection.format(test_user['id']),
+        write_only_permissions_payload,
+        status=200
+    )
+    return test_object
+
+
+@pytest.fixture()
+def sample_full_permissions_object(authorized_app, test_object, test_user,
+                                   full_permissions_payload):
+    authorized_app.post_json(
+        permissions_collection.format(test_user['id']),
+        full_permissions_payload,
         status=200
     )
     return test_object
@@ -258,7 +326,7 @@ def test_type_validation(authorized_app, test_type,
                              status=200).json
 
 
-@pytest.mark.xfail
+@pytest.mark.skip
 def test_type_migration(authorized_app, valid_type_payload,
                         valid_object_payload, invalid_object_payload):
     # Infer wrong schema type
@@ -302,21 +370,10 @@ def test_user_delete(authorized_app, test_user, valid_user_payload):
     assert data.get('api_key') == test_user['api_key']
 
 
-def test_type_permissions_filter(authorized_app, test_object, test_user):
-    data = authorized_app.get(object_collection, status=200).json
-    assert len(data) > 0
-
-    authorized_app.get(object_endpoint.format(test_object['id']), status=200)
-
-    user = UserModel.get(id=test_user['id'])
-    base_auth = authorized_app.authorization
-    authorized_app.authorization = ('Basic', (user.id, user.api_key))
-
+def test_type_permissions_filter(authorized_app, test_object, user_auth):
     authorized_app.get(object_collection, status=403)
     authorized_app.get(object_collection.format(test_object['id']),
                        status=403)
-
-    authorized_app.authorization = base_auth
 
 
 def test_type_permissions_create(authorized_app, test_user,
@@ -332,24 +389,52 @@ def test_type_permissions_create(authorized_app, test_user,
     assert not data['write']
 
 
-def test_type_permissions_access_read(authorized_app, test_user,
-                                      test_read_only_object):
-
-    user = UserModel.get(id=test_user['id'])
-    base_auth = authorized_app.authorization
-    authorized_app.authorization = ('Basic', (user.id, user.api_key))
+def test_type_permissions_access_read(authorized_app,
+                                      sample_read_only_object,
+                                      user_auth):
 
     data = authorized_app.get(object_collection, status=200).json
     assert len(data) > 0
 
     authorized_app.post_json(object_collection, {}, status=403)
     authorized_app.put_json(
-        object_endpoint.format(test_read_only_object['id']),
+        object_endpoint.format(sample_read_only_object['id']),
         {}, status=403
     )
     authorized_app.patch_json(
-        object_endpoint.format(test_read_only_object['id']),
+        object_endpoint.format(sample_read_only_object['id']),
         {}, status=403
     )
 
-    authorized_app.authorization = base_auth
+
+@pytest.mark.skip
+def test_type_permissions_access_create(authorized_app,
+                                        sample_create_only_object,
+                                        user_auth):
+
+    authorized_app.get(object_collection, status=403)
+    authorized_app.post_json(object_collection, {}, status=200)
+    authorized_app.put_json(
+        object_endpoint.format(sample_create_only_object['id']),
+        {}, status=403
+    )
+    authorized_app.patch_json(
+        object_endpoint.format(sample_create_only_object['id']),
+        {}, status=403
+    )
+
+
+def test_type_permissions_access_write(authorized_app,
+                                       sample_write_only_object,
+                                       user_auth):
+
+    authorized_app.get(object_collection, status=403)
+    authorized_app.post_json(object_collection, {}, status=200)
+    authorized_app.put_json(
+        object_endpoint.format(sample_write_only_object['id']),
+        {}, status=200
+    )
+    authorized_app.patch_json(
+        object_endpoint.format(sample_write_only_object['id']),
+        {}, status=200
+    )

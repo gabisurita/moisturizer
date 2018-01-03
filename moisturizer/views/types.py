@@ -173,7 +173,7 @@ class SecureDescribedResource(DescribedResource):
     @reify
     def filters(self):
         filters = super().filters
-        if self.permissions.read or self.permissions.write:
+        if self.permissions.read:
             return filters
 
         raise HTTPForbidden()

@@ -6,4 +6,4 @@ WORKDIR /src
 RUN pip install -r requirements.txt
 RUN python setup.py install
 
-CMD ["pserve", "moisturizer.ini"]
+CMD ["python", "-m", "moisturizer"]

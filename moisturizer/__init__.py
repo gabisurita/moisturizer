@@ -1,121 +1,71 @@
 import os
 import logging
+import asyncio
 
-from pyramid.config import Configurator, ConfigurationError
-from cassandra.cqlengine import connection, management, query
+from aiocassandra import aiosession
+from cassandra.cluster import Cluster
+from cassandra.query import dict_factory
+from cassandra.cqlengine import connection, management
 
 from moisturizer.models import (
     DescriptorModel,
     DescriptorFieldType,
-    UserModel,
-    PermissionModel
 )
+from moisturizer.consumer import MoisturizerKafkaConsumer
 
-
-REQUIRED_SETTINGS = [
-]
-
-DEFAULT_SETTINGS = {
-    'moisturizer.cassandra_cluster': '0.0.0.0',
-    'moisturizer.keyspace': 'moisturizer',
-
-    'moisturizer.read_only': False,
-    'moisturizer.immutable_schema': False,
-    'moisturizer.strict_schema': False,
-
-    'moisturizer.create_keyspace': True,
-    'moisturizer.override_keyspace': False,
-
-    'moisturizer.admin_id': 'admin',
-    'moisturizer.admin_password': 'admin',
-}
-
-
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger('moisturizer')
 
 
-def get_config_environ(name):
-    env_name = name.replace('.', '_').upper()
-    return os.environ.get(env_name)
-
-
-def allow_migratation(settings):
-    return (not settings['moisturizer.read_only'] and
-            not settings['moisturizer.immutable_schema'])
-
-
-def allow_inference_migration(settings):
-    return (allow_migratation(settings) and
-            not settings['moisturizer.strict_schema'])
-
-
-def migrate_metaschema(settings):
+def migrate(settings):
     """Creates if not exists the Table descriptor Model and ajust
     it to the current schema."""
 
-    admin_id = settings['moisturizer.admin_id']
-    admin_password = settings['moisturizer.admin_id']
-    override_keyspace = settings['moisturizer.override_keyspace']
+    override_keyspace = settings['cassandra.override_keyspaces']
 
     if override_keyspace:
-        management.drop_keyspace(settings['moisturizer.keyspace'])
+        management.drop_keyspace(settings['cassandra.keyspace_default'])
 
-    management.create_keyspace_simple(settings['moisturizer.keyspace'],
+    management.create_keyspace_simple(settings['cassandra.keyspace_default'],
                                       replication_factor=1)
 
-    # Create users
-    management.sync_table(UserModel)
-
-    # Create permissions
-    management.sync_table(PermissionModel)
-
-    # Create admin
-    try:
-        UserModel.create(
-            id=admin_id,
-            password=admin_password,
-            role=UserModel.ROLE_ADMIN,
-        )
-    except query.LWTException:
-        pass
-
-    # Create descriptors
     management.sync_table(DescriptorModel)
 
     DescriptorModel.create(id='descriptor_model', properties={
         'properties': DescriptorFieldType(type='object',
                                           format='descriptor'),
     })
-    DescriptorModel.create(id='user_model', properties={
-        'api_key': DescriptorFieldType(type='string',
-                                       format=''),
-    })
 
 
-def main(global_config, **settings):
-    for name, value in DEFAULT_SETTINGS.items():
-        settings.setdefault(name, get_config_environ(name) or value)
+def async_start(settings, cassandra_session):
 
-    for name in REQUIRED_SETTINGS:
-        if settings.get(name) is None:
-            error = 'confiration entry for {} is missing'.format(name)
-            logger.critical(error)
-            raise ConfigurationError(error)
+    loop = asyncio.get_event_loop()
+    # loop.set_debug(True)
 
-    config = Configurator(settings=settings)
-    config.include("cornice")
-    config.include("moisturizer.auth")
-    config.scan("moisturizer.views")
+    consumer = MoisturizerKafkaConsumer(
+        cluster=settings.get('kafka.cluster'),
+        topics=settings.get('kafka.topics').split(','),
+        group=settings.get('kafka.group'),
+        event_loop=loop,
+    )
 
-    connection.setup([settings['moisturizer.cassandra_cluster']],
-                     settings['moisturizer.keyspace'],
-                     protocol_version=3)
+    aiosession(cassandra_session, loop=loop)
+    loop.run_until_complete(consumer.start())
 
-    migrate = allow_migratation(settings)
 
-    os.environ['CQLENG_ALLOW_SCHEMA_MANAGEMENT'] = str(migrate)
+def main(settings):
+    cluster = Cluster([settings['cassandra.cluster']])
+    session = cluster.connect(settings['cassandra.keyspace_default'])
+    session.row_factory = dict_factory
+    connection.set_session(session)
 
-    if migrate:
-        migrate_metaschema(settings)
+    allow_migration = not settings['cassandra.immutable_schema']
 
-    return config.make_wsgi_app()
+    # Prevent CQL engine migration warnings.
+    os.environ['CQLENG_ALLOW_SCHEMA_MANAGEMENT'] = str(allow_migration)
+
+    if allow_migration:
+        migrate(settings)
+
+    logger.info("Starting consumer async loop.")
+    return async_start(settings, session)

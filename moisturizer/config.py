@@ -1,10 +1,12 @@
 import os
 import logging
 
+from raven import Client
+
 
 DEFAULT_SETTINGS = {
     'kafka.cluster': '0.0.0.0:9092',
-    'kafka.topics': 'test',
+    'kafka.topics': 'logs',
     'kafka.group': 'moisturizer',
 
     'cassandra.cluster': '0.0.0.0',
@@ -13,6 +15,8 @@ DEFAULT_SETTINGS = {
     'cassandra.create_keyspaces': True,
     'cassandra.override_keyspaces': False,
     'cassandra.immutable_schema': False,
+
+    'raven.sentry_dsn': '',
 }
 
 
@@ -42,3 +46,4 @@ def load_settings(**settings):
 
 
 settings = load_settings()
+raven = Client(settings['raven.sentry_dsn'])

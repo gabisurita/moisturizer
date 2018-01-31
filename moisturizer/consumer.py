@@ -6,6 +6,7 @@ from aiokafka import AIOKafkaConsumer
 
 from moisturizer.models import DescriptorModel
 from moisturizer.schemas import InferredObjectSchema
+from moisturizer.config import raven
 
 
 class MoisturizerKafkaConsumer:
@@ -41,9 +42,12 @@ class MoisturizerKafkaConsumer:
 
     async def get_descriptor(self, type_id):
         cached = self.descriptors.get(type_id)
-        if cached:
+        if cached is not None:
             return cached
 
+        return await self.load_descriptor(type_id)
+
+    async def load_descriptor(self, type_id):
         try:
             descriptor = DescriptorModel.get(id=type_id)
         except DescriptorModel.DoesNotExist as e:
@@ -60,16 +64,12 @@ class MoisturizerKafkaConsumer:
         deserialized = schema.deserialize(payload)
         flatten = schema.flatten(deserialized)
 
-        try:
-            descriptor.infer_schema_change(flatten)
-        except Exception as e:
-            print(e)
+        changes = descriptor.infer_schema_change(flatten)
+        if changes:
+            descriptor = await self.load_descriptor(type_)
 
-        try:
-            model = descriptor.model(**flatten)
-            model.save()
-        except Exception as e:
-            print(e)
+        model = descriptor.model(**flatten)
+        model.save()
 
     async def start(self):
         consumer = AIOKafkaConsumer(
@@ -83,7 +83,10 @@ class MoisturizerKafkaConsumer:
         try:
             # Consume messages
             async for message in consumer:
-                asyncio.ensure_future(self.commit_message(message))
+                try:
+                    asyncio.ensure_future(self.commit_message(message))
+                except Exception as e:
+                    raven.captureException()
         finally:
             # Will leave consumer group; perform autocommit if enabled.
             await consumer.stop()

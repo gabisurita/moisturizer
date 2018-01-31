@@ -1,11 +1,8 @@
 import colander
+import flatten_json
 
 from moisturizer.models import (
     DescriptorFieldType,
-)
-from moisturizer.utils import (
-    flatten_dict,
-    unflatten_dict,
 )
 
 
@@ -28,27 +25,7 @@ JSONSCHEMA_COLANDER_TYPE_MAPPER = {
 
     ('object', 'descriptor'): lambda **kwargs:
         colander.Mapping(unknown='preserve', **kwargs),
-
-    ('array', None): lambda **kwargs:
-        colander.Sequence(colander.String, **kwargs),
 }
-
-
-valid_http_method = colander.OneOf(('GET', 'HEAD', 'DELETE', 'TRACE',
-                                    'POST', 'PUT', 'PATCH'))
-
-
-valid_types = colander.OneOf(('string', 'number', 'object',
-                              'array', 'boolean', 'null'))
-
-
-def _check_string_values(node, cstruct):
-    """validate that a ``colander.mapping`` has only string values."""
-
-    are_strings = [isinstance(v, str) for v in cstruct.values()]
-    if not all(are_strings):
-        error_msg = '{} contains non string value'.format(cstruct)
-        raise colander.invalid(node, error_msg)
 
 
 class BaseMappingSchema(colander.MappingSchema):
@@ -58,12 +35,18 @@ class BaseMappingSchema(colander.MappingSchema):
         return colander.Mapping(unknown='preserve')
 
     def flatten(self, nested):
-        return flatten_dict(nested)
+        return {k: v for k, v in
+                flatten_json.flatten(nested, separator='.').items()
+                if v is not None}
 
     def unflatten(self, flatten):
-        return unflatten_dict(flatten)
+        return flatten_json.unflatten(flatten, separator='.')
 
     def deserialize(self, cstruct):
+        id_field = cstruct.get('id')
+        if id_field is not None:
+            cstruct['id'] = str(id_field)
+
         return super().deserialize({k: v for k, v in cstruct.items()
                                     if v is not None})
 

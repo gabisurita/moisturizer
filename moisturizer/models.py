@@ -27,9 +27,6 @@ JSONSCHEMA_CQL_TYPE_MAPPER = {
     ('object', 'descriptor'): lambda **kwargs:
         columns.Map(columns.Text(),
                     columns.UserDefinedType(DescriptorFieldType), **kwargs),
-
-    ('array', None): lambda **kwargs:
-        columns.list(columns.Text(), **kwargs),
 }
 
 
@@ -89,7 +86,7 @@ class DescriptorFieldType(usertype.UserType):
     primary_key = columns.Boolean(default=False)
     partition_key = columns.Boolean(default=False)
     required = columns.Boolean(default=False)
-    index = columns.Boolean(default=False, db_field='index_')
+    index = columns.Boolean(default=True, db_field='index_')
 
     @classmethod
     def from_value(cls, value):

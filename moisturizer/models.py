@@ -1,4 +1,3 @@
-import bcrypt
 import datetime
 import logging
 import uuid
@@ -28,9 +27,6 @@ JSONSCHEMA_CQL_TYPE_MAPPER = {
     ('object', 'descriptor'): lambda **kwargs:
         columns.Map(columns.Text(),
                     columns.UserDefinedType(DescriptorFieldType), **kwargs),
-
-    ('array', None): lambda **kwargs:
-        columns.list(columns.Text(), **kwargs),
 }
 
 
@@ -58,7 +54,6 @@ class InferredModel(models.Model):
                       default=lambda: str(uuid.uuid4().hex))
     last_modified = columns.DateTime(index=True,
                                      default=datetime.datetime.now)
-    owner = columns.Text(index=True)
 
     @classmethod
     def add_column(cls, name, column_type):
@@ -91,7 +86,7 @@ class DescriptorFieldType(usertype.UserType):
     primary_key = columns.Boolean(default=False)
     partition_key = columns.Boolean(default=False)
     required = columns.Boolean(default=False)
-    index = columns.Boolean(default=False, db_field='index_')
+    index = columns.Boolean(default=True, db_field='index_')
 
     @classmethod
     def from_value(cls, value):
@@ -185,66 +180,3 @@ class DescriptorModel(InferredModel):
 
         management.drop_table(self.model)
         return super().delete(**kwargs)
-
-
-class UserModel(InferredModel):
-    ROLE_USER = 'user'
-    ROLE_ADMIN = 'admin'
-
-    _password = columns.Ascii(required=True)
-    api_key = columns.Text(default=lambda: str(uuid.uuid4().hex))
-    role = columns.Text(default=ROLE_USER, index=True)
-
-    @property
-    def permissions(self):
-        return PermissionModel.for_user(self)
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        plain_password = kwargs.get('password')
-        self.process_plain_password(plain_password)
-
-    @classmethod
-    def create(cls, *args, **kwargs):
-        created = cls(*args, **kwargs)
-        plain_password = kwargs.get('password')
-        created.process_plain_password(plain_password)
-        created.save()
-        management.sync_table(created.permissions)
-        return created
-
-    def delete(self, **kwargs):
-        management.drop_table(self.permissions)
-        return super().delete(**kwargs)
-
-    def process_plain_password(self, plain_password):
-        if plain_password:
-            hashed = bcrypt.hashpw(plain_password.encode('utf-8'),
-                                   bcrypt.gensalt())
-            self._password = hashed.decode('utf-8')
-
-    def check_password(self, given_password):
-        return bcrypt.checkpw(given_password.encode('utf-8'),
-                              self._password.encode('utf-8'))
-
-
-class PermissionModel(models.Model):
-    id = columns.Text(partition_key=True)
-    read = columns.Boolean(default=False)
-    write = columns.Boolean(default=False)
-    create_ = columns.Boolean(default=False)
-
-    @classmethod
-    def admin(self):
-        return PermissionModel(
-            read=True,
-            write=True,
-            create_=True,
-        )
-
-    @classmethod
-    def for_user(cls, user):
-        """
-        Builds a PermissionModel child class from an user object.
-        """
-        return type('{}_permissions'.format(user.id), (cls,), {})

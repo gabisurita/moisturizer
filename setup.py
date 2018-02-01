@@ -4,13 +4,12 @@ import os
 from setuptools import setup, find_packages
 
 REQUIREMENTS = [
-    'bcrypt',
+    'aiocassandra',
+    'aiokafka',
     'cassandra-driver',
-    'cornice',
     'colander',
-    'PasteScript',
-    'waitress',
     'logmatic-python',
+    'msgpack',
 ]
 
 

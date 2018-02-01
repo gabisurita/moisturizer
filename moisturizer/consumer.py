@@ -2,7 +2,7 @@ import asyncio
 import json
 import msgpack
 
-from aiokafka import AIOKafkaConsumer
+from kafka import KafkaConsumer
 
 from moisturizer.models import DescriptorModel
 from moisturizer.schemas import InferredObjectSchema
@@ -21,9 +21,7 @@ class MoisturizerKafkaConsumer:
         self.group = group
         self._loop = event_loop
 
-    async def unwrap_message(self, message):
-        raw_value = message.value
-
+    def unwrap_message(self, raw_value):
         # Try to decode MsgPack
         try:
             payload = msgpack.loads(raw_value, encoding='utf-8')
@@ -40,14 +38,14 @@ class MoisturizerKafkaConsumer:
 
         return type_, data
 
-    async def get_descriptor(self, type_id):
+    def get_descriptor(self, type_id):
         cached = self.descriptors.get(type_id)
         if cached is not None:
             return cached
 
-        return await self.load_descriptor(type_id)
+        return self.load_descriptor(type_id)
 
-    async def load_descriptor(self, type_id):
+    def load_descriptor(self, type_id):
         try:
             descriptor = DescriptorModel.get(id=type_id)
         except DescriptorModel.DoesNotExist as e:
@@ -56,9 +54,9 @@ class MoisturizerKafkaConsumer:
         self.descriptors[type_id] = descriptor
         return descriptor
 
-    async def commit_message(self, message):
-        type_, payload = await self.unwrap_message(message)
-        descriptor = await self.get_descriptor(type_)
+    def commit_message(self, message):
+        type_, payload = self.unwrap_message(message)
+        descriptor = self.get_descriptor(type_)
 
         schema = self.schema.bind(descriptor=descriptor)
         deserialized = schema.deserialize(payload)
@@ -66,27 +64,20 @@ class MoisturizerKafkaConsumer:
 
         changes = descriptor.infer_schema_change(flatten)
         if changes:
-            descriptor = await self.load_descriptor(type_)
+            descriptor = self.load_descriptor(type_)
 
         model = descriptor.model(**flatten)
         model.save()
 
     async def start(self):
-        consumer = AIOKafkaConsumer(
+        consumer = KafkaConsumer(
             *self.topics,
-            loop=self._loop,
             bootstrap_servers=self.cluster,
             group_id=self.group,
         )
-
-        await consumer.start()
-        try:
-            # Consume messages
-            async for message in consumer:
-                try:
-                    asyncio.ensure_future(self.commit_message(message))
-                except Exception as e:
-                    raven.captureException()
-        finally:
-            # Will leave consumer group; perform autocommit if enabled.
-            await consumer.stop()
+        # Consume messages
+        for message in consumer:
+            try:
+                await asyncio.ensure_future(self.commit_message(message.value))
+            except Exception as e:
+                raven.captureException()

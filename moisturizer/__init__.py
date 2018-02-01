@@ -61,7 +61,7 @@ def async_start(settings, cassandra_session):
 
 def main(settings):
     cluster = Cluster([settings['cassandra.cluster']])
-    session = cluster.connect(default_timeout=30)  # for large schema syncs
+    session = cluster.connect()
     session.row_factory = dict_factory
     connection.set_session(session)
 

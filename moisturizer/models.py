@@ -51,7 +51,7 @@ class InferredModel(models.Model):
     extending and creating custom inferred models.
     """
     id = columns.Text(primary_key=True,
-                      default=lambda: str(uuid.uuid4().hex))
+                      default=lambda: str(uuid.uuid1().hex))
     last_modified = columns.DateTime(index=True,
                                      default=datetime.datetime.now)
 

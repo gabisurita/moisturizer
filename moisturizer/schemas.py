@@ -36,11 +36,11 @@ class BaseMappingSchema(colander.MappingSchema):
 
     def flatten(self, nested):
         return {k: v for k, v in
-                flatten_json.flatten(nested, separator='.').items()
+                flatten_json.flatten(nested, separator='__').items()
                 if v is not None}
 
     def unflatten(self, flatten):
-        return flatten_json.unflatten(flatten, separator='.')
+        return flatten_json.unflatten(flatten, separator='__')
 
     def deserialize(self, cstruct):
         id_field = cstruct.get('id')

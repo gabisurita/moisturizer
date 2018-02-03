@@ -12,7 +12,7 @@ Using docker:
 .. code-block:: bash
 
     docker pull cassandra
-    run --name cassandra-server \
+    docker run --name cassandra-server \
         -p 127.0.0.1:9042:9042 \
         -p 127.0.0.1:9160:9160 \
         -d cassandra

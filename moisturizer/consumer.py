@@ -54,7 +54,7 @@ class MoisturizerKafkaConsumer:
         self.descriptors[type_id] = descriptor
         return descriptor
 
-    def commit_message(self, message):
+    async def commit_message(self, message):
         type_, payload = self.unwrap_message(message)
         descriptor = self.get_descriptor(type_)
 

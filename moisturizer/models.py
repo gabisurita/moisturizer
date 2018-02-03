@@ -17,7 +17,7 @@ NATIVE_JSONSCHEMA_TYPE_MAPPER = {
 JSONSCHEMA_CQL_TYPE_MAPPER = {
     ('string', None): columns.Text,
     ('number', None): columns.Decimal,
-    ('integer', None): columns.Integer,
+    ('integer', None): columns.BigInt,
     ('boolean', None): columns.Boolean,
     ('null', None): lambda **_: None,
     ('string', 'date-time'): columns.DateTime,

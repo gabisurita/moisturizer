@@ -43,5 +43,6 @@ Testing
 
 .. code-block:: bash
 
-    pip install -r requirements_test.txt
-    pytest tests
+    make install-dev
+    make tests-once  # Run local Python version
+    make tests  # Run full suite
